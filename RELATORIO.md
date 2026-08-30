@@ -133,6 +133,52 @@ disponíveis naquele momento (`meu-bucket-teste_10`, `_13`, `_14` no
 Isso é o próprio propósito do SeaweedFS: agrupar muitos arquivos pequenos
 em poucos arquivos grandes no disco, em vez de um inode por arquivo.
 
+### 3.1 Correção: o que apareceu na GUI do admin era outra coisa
+
+A explicação acima é sobre os arquivos `.dat`/`.idx`/`.vif` vistos **no
+disco** dos volume servers (via SSH). Mas o que motivou a pergunta era uma
+tela diferente: o navegador de arquivos do **admin dashboard**
+(`http://.../buckets/meu-bucket-teste/`), que mostrou uma pasta oculta
+`.uploads/` cheia de subpastas com nome de hash, e dentro delas arquivos
+tipo `0001_62f744da-ec0f-48f0-8158-5c5f1108fb26.part`, todos de 5.0 MB.
+
+**O que é:** a área de estágio (staging) do **S3 Multipart Upload**, uma
+funcionalidade do protocolo S3 pra enviar um arquivo grande em pedaços
+paralelos em vez de um PUT único. O fluxo:
+
+1. O cliente pede `CreateMultipartUpload` → o Filer cria uma pasta de
+   sessão em `.uploads/<id-da-sessão>/`.
+2. Cada pedaço do arquivo vira um `UploadPart` separado → cada um vira um
+   arquivo `NNNN_<uuid>.part` dentro dessa pasta (`NNNN` = número
+   sequencial da parte).
+3. Ao terminar, o cliente manda `CompleteMultipartUpload` → o Filer junta
+   as partes na ordem certa como um único objeto final e (normalmente)
+   limpa a pasta de estágio.
+
+**Por que apareceu com `rclone`:** o `rclone` muda pra multipart
+automaticamente acima de um tamanho de corte (padrão do rclone:
+`--s3-upload-cutoff 200MiB`, `--s3-chunk-size 5MiB`) — seus arquivos de
+teste são exatamente 200MB, na borda desse corte, e os pedaços de 5.0 MB
+batem exatamente com o `--s3-chunk-size` padrão. Com `--transfers 8`, você
+tinha até 8 sessões de multipart em paralelo ao mesmo tempo — daí várias
+pastas de hash diferentes em `.uploads/`.
+
+**Por que não aparece no `mc ls`:** `.uploads/` é um detalhe interno do
+**namespace do Filer** (a árvore de pastas/arquivos que o Filer mantém —
+diferente da camada de volumes da seção 3), não um objeto S3 de verdade.
+Testado: `mc ls swfslab/meu-bucket-teste/` não lista `.uploads` nem seu
+conteúdo — a API S3 filtra isso de propósito, porque não é um objeto que o
+cliente pediu pra ver. Só aparece navegando pela árvore de arquivos do
+Filer/admin dashboard diretamente, que mostra a estrutura de pastas crua,
+sem esse filtro.
+
+Resumindo as duas camadas, pra não confundir de novo:
+- **Volumes (`.dat`/`.idx`/`.vif`, seção 3)** — arquivo físico no disco do
+  volume server, onde o dado já GRAVADO fica de fato. Visível só via SSH.
+- **`.uploads/*.part` (esta seção)** — estágio temporário de um upload
+  **ainda em andamento**, no namespace do Filer. Visível no admin
+  dashboard, some quando o upload termina.
+
 ## Referências
 - [README.md](README.md) — arquitetura do lab
 - [00-config.env](00-config.env) — parâmetros do ambiente
