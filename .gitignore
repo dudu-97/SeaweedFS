@@ -1,0 +1,17 @@
+# Imagens-base (cloud images grandes, baixadas por 01-baixar-imagem.sh)
+/Imagens/
+
+# Estado de cada VM: discos overlay (.qcow2), seed cloud-init (.iso),
+# user-data/meta-data/network-config gerados (contêm a chave privada
+# do cluster embutida) — tudo isso é gerado por 02-criar-discos.sh e
+# 04-gerar-cloud-init.sh, não é código-fonte do lab.
+/swfs-*/
+
+# Chave SSH exclusiva do cluster (gerada por 04-gerar-cloud-init.sh)
+/cluster_key
+/cluster_key.pub
+
+# Rede de segurança: qualquer binário de VM solto fora dos padrões acima
+*.qcow2
+*.img
+*.iso
