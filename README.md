@@ -127,6 +127,7 @@ Todos são idempotentes: se um disco, VM ou rede já existe, o script avisa e se
 | swfs-vol1, swfs-vol2 | volume | 8080 | `/status` | HTTP 200 |
 | swfs-vol1 | filer | 8888 | `/` | HTTP 200 |
 | swfs-vol1 | S3 API | 8333 | `/` (list buckets) | HTTP 200 |
+| swfs-vol1 | admin (dashboard web) | 23646 | `/` | HTTP 200 |
 
 Saída esperada logo após o deploy:
 
@@ -149,6 +150,12 @@ curl -s http://192.168.100.21:8888/          # UI do Filer
 ```
 
 Para um cliente S3 de verdade (`aws s3`, `mc`, etc.), instale o pacote correspondente na VM e aponte o `--endpoint-url`/alias para `http://192.168.100.21:8333`.
+
+O `weed admin` (dashboard web, `swfs-vol1:23646`) mostra topologia do cluster, volumes, métricas e navegador de arquivos — descobre o filer automaticamente pelos masters, sem configuração adicional. Para abrir no navegador do host, um túnel SSH pelo roteador:
+```bash
+ssh -L 23646:192.168.100.21:23646 -o ProxyCommand="ssh -W %h:%p swfs@192.168.122.150" swfs@192.168.100.21
+```
+e depois acesse `http://localhost:23646` no host. Sem `-adminPassword`, a autenticação fica desabilitada — aceitável só para lab.
 
 ## Acesso SSH
 

@@ -166,6 +166,30 @@ for vm in "${VM_NAMES[@]}"; do
   - systemctl enable --now weed-filer.service"
     fi
 
+    if [[ "$vm" == "$ADMIN_HOST" ]]; then
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-admin.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS Admin (dashboard web)
+      After=network-online.target weed-volume.service
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed admin -port=${SEAWEED_ADMIN_PORT} -master=${MASTER_PEERS} -dataDir=${DATA_MOUNT_DIR}/admin
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - mkdir -p ${DATA_MOUNT_DIR}/admin
+  - systemctl daemon-reload
+  - systemctl enable --now weed-admin.service"
+    fi
+
     cat > "$VM_DIR/user-data" <<EOF
 #cloud-config
 hostname: ${vm}

@@ -45,6 +45,7 @@ for vm in "${VM_NAMES[@]}"; do
         CHECKS+=("${SEAWEED_FILER_PORT}:/:filer")
         CHECKS+=("${SEAWEED_S3_PORT}:/:s3")
     fi
+    [[ "$vm" == "$ADMIN_HOST" ]] && CHECKS+=("${SEAWEED_ADMIN_PORT}:/:admin")
 
     REMOTE_CMD='command -v weed >/dev/null 2>&1 && echo "BIN:ok" || echo "BIN:falta"; '
     REMOTE_CMD+='mountpoint -q '"${DATA_MOUNT_DIR}"' && echo "DISK:ok" || echo "DISK:falta"; '
