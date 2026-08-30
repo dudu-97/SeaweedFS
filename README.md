@@ -6,9 +6,11 @@ rede **isolada** do KVM, atrás de uma **VM roteadora** (mesma imagem
 Ubuntu das demais) com IP forwarding + NAT já automatizados via
 cloud-init — zero passo manual de infraestrutura.
 
-A instalação do próprio SeaweedFS é manual (de propósito, para você
-aprender antes de automatizar) — esse é o único passo manual do lab;
-todo o resto (VMs, discos, rede, SSH, NAT/internet) já sobe pronto com
+Subir os *processos* do próprio SeaweedFS (`weed master/volume/filer`)
+é manual (de propósito, para você aprender a topologia antes de
+automatizar) — esse é o único passo manual do lab. Todo o resto (VMs,
+discos, rede, SSH, NAT/internet, disco de dados formatado/montado e o
+binário `weed` já instalado em cada VM) já sobe pronto com
 `./deploy-lab.sh`.
 
 > Tentamos primeiro um roteador **FreeBSD** via cloud-init (a imagem
@@ -57,8 +59,10 @@ Por que essa topologia (e não só 3 VMs):
   SeaweedFS) e a API S3 sem custo extra de máquina.
 
 Cada VM do cluster tem 2 discos, como pedido: `${OS_DISK_SIZE}` de
-sistema e `${DATA_DISK_SIZE}` de dados (use o disco de dados, ex.
-`/dev/vdb`, como diretório de dados do `weed volume`/`weed master`).
+sistema e `${DATA_DISK_SIZE}` de dados. O cloud-init já formata (ext4)
+e monta o disco de dados em `/data` (dono: usuário `swfs`) no primeiro
+boot — é esse `/data` que você aponta em `-mdir`/`-dir` ao rodar
+`weed master`/`weed volume`.
 
 ## Organização de diretórios
 
@@ -145,6 +149,25 @@ Ambos os problemas foram confirmados ao vivo (SSH nas VMs, `journalctl`,
 logs do cloud-init) antes de mexer nos scripts — o lab atual já reflete
 as correções.
 
+## Requisitos mínimos
+
+**Testado em:** host Ubuntu 26.04 LTS, AMD Ryzen 5 2600 (6 núcleos/12
+threads), 30 GB RAM, libvirt 12.0.0, qemu-img 10.2.1, cloud-init
+26.1 — VMs guest em Ubuntu Server 24.04 LTS (cloud image "noble").
+
+**Mínimo recomendado para rodar as 6 VMs simultaneamente:**
+
+| Recurso | Mínimo | Por quê |
+|---|---|---|
+| CPU | 8 threads, com virtualização (Intel VT-x / AMD-V) exposta ao host | 5 VMs × 2 vCPU + roteador × 1 vCPU = 11 vCPU alocados (com overcommit; 8 threads físicas já rodam bem) |
+| RAM | 16 GB (32 GB confortável) | 5 × 2 GB + roteador × 1 GB = 11 GB só de VMs; o host e o cache do KVM precisam de sobra |
+| Disco | ~150 GB livres | 5 × (16 GB SO + 10 GB dados) + 10 GB do roteador + imagem-base (~600 MB) |
+| KVM | `/dev/kvm` presente | confirme com `kvm-ok` (pacote `cpu-checker`) ou `ls /dev/kvm` |
+
+Se o host tiver menos RAM/CPU, dá pra reduzir `VM_RAM_MB`/`VM_VCPUS` em
+`00-config.env` — o cluster sobe com menos recursos, só fica mais lento
+sob carga (não afeta o aprendizado da topologia/raft/replicação).
+
 ## Pré-requisitos
 
 ```bash
@@ -173,10 +196,14 @@ Ele roda, na ordem:
    reserva o IP WAN fixo do roteador na rede `default`
 4. `04-gerar-cloud-init.sh` — gera a chave do cluster + seed.iso (IP
    estático) de cada VM Ubuntu e do roteador (com NAT/forwarding já
-   configurados)
+   configurados); nas 5 VMs do cluster, o cloud-init também já baixa o
+   binário `weed` e formata/monta o disco de dados em `/data` (veja
+   "Requisitos mínimos" e `SEAWEED_VERSION` em `00-config.env`)
 5. `05-criar-vms.sh` — sobe as 5 VMs do cluster + a VM do roteador,
    todas já provisionadas
-6. `06-status.sh` — mostra estado/IP de todas as VMs
+6. `06-status.sh` — mostra estado/IP de todas as VMs, e um relatório
+   de status do SeaweedFS por VM (binário instalado, disco montado,
+   portas ativas de master/volume/filer/S3/admin)
 
 Ao final, o lab já está com internet e SSH funcionando — nenhum passo
 manual de infraestrutura pendente.
@@ -252,33 +279,119 @@ destruída — só a reserva de IP que este lab adicionou nela.
 
 ## Próximos passos (instalação manual do SeaweedFS)
 
-Depois que o roteador estiver roteando e as 5 VMs tiverem internet, a
-instalação manual do SeaweedFS (fora do escopo destes scripts, de
-propósito) é basicamente:
+O `./deploy-lab.sh` já deixa pronto, via cloud-init, nas 5 VMs do
+cluster: o binário `weed` instalado em `/usr/local/bin` e o disco de
+dados formatado, montado em `/data` e com dono certo (`swfs`). Confira
+com `./06-status.sh` (mostra `BINARIO`/`DISCO` de cada VM). **O único
+passo manual que resta — de propósito, para você aprender a topologia
+antes de automatizar — é subir os processos do SeaweedFS**, um em cada
+VM (recomendado: `tmux`/`screen`, ou `nohup ... &`, senão o processo
+morre ao fechar a sessão SSH — veja "Pontos de atenção" abaixo):
 
 ```bash
-# em cada uma das 5 VMs
-curl -L https://github.com/seaweedfs/seaweedfs/releases/latest/download/linux_amd64_large_disk.tar.gz \
-  | sudo tar -xz -C /usr/local/bin weed
-sudo mkfs.ext4 /dev/vdb && sudo mkdir -p /data && sudo mount /dev/vdb /data
-
-# nos 3 masters (rodar em cada um, apontando os --peers para os 3):
-weed master -mdir=/data -ip=<meu-ip> \
+# nos 3 masters (rodar em cada um, IP e -peers apontando para os 3):
+weed master -mdir=/data -ip=192.168.100.11 \
   -peers=192.168.100.11:9333,192.168.100.12:9333,192.168.100.13:9333
+  # (troque -ip para .12 e .13 nos outros dois masters)
 
 # em swfs-vol1 (rack1) e swfs-vol2 (rack2):
 weed volume -dir=/data -mserver=192.168.100.11:9333,192.168.100.12:9333,192.168.100.13:9333 \
-  -ip=<meu-ip> -dataCenter=dc1 -rack=rack1   # (rack2 na outra VM)
+  -ip=192.168.100.21 -dataCenter=dc1 -rack=rack1   # (rack2 e -ip=.22 na outra VM)
 
-# filer + S3, só em swfs-vol1:
-weed filer -master=192.168.100.11:9333,192.168.100.12:9333,192.168.100.13:9333 -s3
+# filer + S3, só em swfs-vol1 (-defaultStoreDir evita gravar o metastore
+# num caminho relativo ao diretório onde você rodou o comando, veja
+# "Pontos de atenção"):
+weed filer -master=192.168.100.11:9333,192.168.100.12:9333,192.168.100.13:9333 -s3 \
+  -defaultStoreDir=/data
+
+# painel admin (opcional, qualquer VM com o binário — ex: swfs-vol1):
+weed admin -port=23646 -masters=192.168.100.11:9333,192.168.100.12:9333,192.168.100.13:9333
 ```
 
-Quando quiser automatizar isso depois (systemd units, config por
-role, etc.), me chama.
+Depois de subir tudo, confirme com `./06-status.sh` (relatório de
+portas ativas por VM) ou manualmente:
+```bash
+curl -s http://192.168.100.11:9333/cluster/status | jq .   # cluster raft
+curl -s http://192.168.100.21:8888/                          # filer UI
+curl -s http://192.168.100.21:8333/                          # S3 API
+```
+Do seu HOST, isso só funciona se você tiver adicionado a rota para a
+rede isolada (veja "Pontos de atenção" abaixo) — senão rode o `curl`
+de dentro de uma VM via SSH.
+
+Quando quiser automatizar esses comandos também (systemd units, config
+por role, etc.), me chama.
+
+## Pontos de atenção (erros comuns na instalação manual)
+
+Registro dos erros que apareceram testando o passo a passo acima, para
+quem for repetir o lab não perder tempo com o mesmo problema:
+
+1. **`curl ... --output` sem nome de arquivo** — `--output`/`-o` exige
+   um argumento (`--output weed.tar.gz`). Sem o binário pré-instalado
+   pelo cloud-init isso nem é mais necessário, mas fica registrado.
+
+2. **`permission denied` ao rodar `weed master/volume/filer`** — se
+   você formatou o disco de dados manualmente (`mkfs.ext4` + `mount`),
+   o diretório raiz do filesystem nasce com dono `root:root`. O
+   processo `weed` roda como usuário `swfs` e precisa de:
+   ```bash
+   sudo chown -R swfs:swfs /data
+   ```
+   O cloud-init atual já faz isso sozinho no primeiro boot (formata,
+   monta e ajusta o dono) — só é relevante se você reformatar o disco
+   na mão.
+
+3. **`bind: cannot assign requested address` no `weed master`** —
+   confira em qual VM você está antes de rodar o comando com `-ip=`
+   fixo (`hostname` ou `ip -4 addr show`). Esse erro geralmente é
+   sintoma de estar numa VM diferente da que você pretendia (ex:
+   comando com `-ip=192.168.100.11` rodado dentro da `swfs-vol1`).
+
+4. **`weed filer` falha com `stat ./filerldb2: no such file or
+   directory`** — sem um `filer.toml`, o filer grava seu metastore
+   (LevelDB) num caminho **relativo ao diretório onde o comando foi
+   executado**. Se você estiver em `/` (comum logo após o SSH), o
+   usuário `swfs` não tem permissão de criar pastas ali. Sempre passe
+   `-defaultStoreDir=/data` explicitamente (ou dê `cd /data` antes).
+
+5. **Testar uma porta de serviço na VM errada** — `9333` (master) só
+   existe nos 3 masters; `8080` (volume), `8888` (filer) e `8333` (S3)
+   só existem em `swfs-vol1`/`swfs-vol2`. "Não carrega nada" nessas
+   portas na VM errada é esperado, não é bug. Tabela de referência:
+
+   | Porta | Serviço | Onde roda |
+   |---|---|---|
+   | 9333 | master (API + raft) | swfs-master1/2/3 |
+   | 8080 | volume server | swfs-vol1, swfs-vol2 |
+   | 8888 | filer (UI + API, navegador de arquivos em `/buckets/`) | swfs-vol1 |
+   | 8333 | S3 API (sem GUI própria — use um cliente S3 pra navegar) | swfs-vol1 |
+   | 23646 | `weed admin` (painel web, mais próximo do dashboard do Ceph) | onde você rodar o comando |
+
+6. **Host não alcança `192.168.100.0/24` (rede isolada) direto** — por
+   desenho (veja "Rede isolada + roteador" acima), o host só tem rota
+   pra rede `default` do KVM (`192.168.122.0/24`), não pra LAN isolada
+   do lab. O roteador já tem `ip_forward=1` e nenhuma regra bloqueando
+   `FORWARD`, então basta adicionar uma rota estática no HOST (não nas
+   VMs — o gateway delas já é o roteador):
+   ```bash
+   sudo ip route add 192.168.100.0/24 via 192.168.122.150
+   ```
+   Pra persistir entre reboots do host, um serviço systemd oneshot
+   (`After=libvirtd.service`) com esse `ip route add`/`del` no
+   `ExecStart`/`ExecStop` — mesmo padrão do `swfs-nat.service` do
+   roteador. Sem essa rota, `curl`/navegador no host não vai enxergar
+   nenhuma VM do lab (funciona normalmente de dentro de qualquer VM via
+   SSH, já que elas se enxergam entre si).
+
+7. **Processo `weed` morre ao fechar a sessão SSH** — ele roda em
+   foreground. Use `tmux`/`screen`, ou `nohup weed ... > /tmp/weed.log
+   2>&1 &` seguido de `disown`, senão fechar o terminal mata o serviço.
 
 ## Reconfigurar
 
 Tudo centralizado em `00-config.env`: nomes/IP/MAC das VMs e do
 roteador, RAM/vCPU, tamanho dos discos, usuário/senha, chave SSH do
-host, URLs das imagens-base e diretórios (`LAB_DIR`, `IMAGES_DIR`).
+host, URLs das imagens-base e diretórios (`LAB_DIR`, `IMAGES_DIR`), e a
+pré-instalação do SeaweedFS (`SEAWEED_VERSION` — "latest" ou uma tag
+fixa, `DATA_DISK_DEVICE`, `DATA_MOUNT_DIR`).

@@ -8,6 +8,10 @@
 #       * chave privada/pública do cluster em ~/.ssh (VM <-> VM sem senha)
 #       * /etc/hosts com todas as VMs + o roteador
 #       * ~/.ssh/config sem prompt de host key entre os nós do lab
+#       * disco de dados formatado/montado em /data (dono = usuário)
+#       * binário `weed` já baixado e instalado em /usr/local/bin
+#     (o único passo manual que sobra é rodar os comandos `weed
+#     master/volume/filer/admin` -- veja README > Próximos passos)
 #
 # A VM swfs-router (BSD) NÃO entra aqui: ela é instalada manualmente.
 # =====================================================================
@@ -30,6 +34,14 @@ else
   sudo apt install cloud-image-utils"
 fi
 log "Gerador de seed ISO: $SEED_TOOL"
+
+# --- URL de download do binário do SeaweedFS (pré-instalado via cloud-init) ---
+if [[ "$SEAWEED_VERSION" == "latest" ]]; then
+    SEAWEED_DOWNLOAD_URL="https://github.com/seaweedfs/seaweedfs/releases/latest/download/linux_amd64_large_disk.tar.gz"
+else
+    SEAWEED_DOWNLOAD_URL="https://github.com/seaweedfs/seaweedfs/releases/download/${SEAWEED_VERSION}/linux_amd64_large_disk.tar.gz"
+fi
+log "SeaweedFS será pré-instalado via cloud-init: $SEAWEED_DOWNLOAD_URL"
 
 # --- chave SSH do HOST (para você acessar as VMs) ---------------------
 if [[ ! -f "$SSH_PUBKEY_PATH" ]]; then
@@ -74,6 +86,11 @@ for vm in "${VM_NAMES[@]}"; do
 hostname: ${vm}
 fqdn: ${vm}.${LAB_DOMAIN}
 manage_etc_hosts: false
+
+packages:
+  - curl
+  - tar
+  - e2fsprogs
 
 users:
   - default
@@ -134,6 +151,20 @@ runcmd:
   - systemctl enable --now ssh
   - chown -R ${VM_USER}:${VM_USER} /home/${VM_USER}/.ssh
   - chmod 700 /home/${VM_USER}/.ssh
+
+  # --- disco de dados: formata (1x), monta em ${DATA_MOUNT_DIR} e dá o
+  # dono certo ao ${VM_USER} -- sem isso, "weed master/volume/filer"
+  # falha com "permission denied" ao criar suas pastas de estado.
+  - [ bash, -c, "blkid ${DATA_DISK_DEVICE} >/dev/null 2>&1 || mkfs.ext4 -F -L swfs-data ${DATA_DISK_DEVICE}" ]
+  - mkdir -p ${DATA_MOUNT_DIR}
+  - [ bash, -c, "grep -q '^LABEL=swfs-data' /etc/fstab || echo 'LABEL=swfs-data ${DATA_MOUNT_DIR} ext4 defaults 0 2' >> /etc/fstab" ]
+  - mount -a
+  - chown ${VM_USER}:${VM_USER} ${DATA_MOUNT_DIR}
+
+  # --- binário do SeaweedFS pré-instalado, pronto para "weed master/
+  # volume/filer/admin" (passo manual, veja README > Próximos passos)
+  - [ bash, -c, "command -v weed >/dev/null 2>&1 || curl -fsSL '${SEAWEED_DOWNLOAD_URL}' | tar -xz -C /usr/local/bin weed" ]
+  - [ bash, -c, "weed version || true" ]
 EOF
 
     cat > "$VM_DIR/meta-data" <<EOF

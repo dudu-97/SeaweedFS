@@ -22,6 +22,46 @@ for vm in "${VM_NAMES[@]}"; do
 done
 
 echo
+echo "Status dos serviços SeaweedFS (SSH via jump pelo roteador):"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -o BatchMode=yes"
+
+declare -A PORT_ROLE=(
+    [9333]="master"
+    [8080]="volume"
+    [8888]="filer"
+    [8333]="s3"
+    [23646]="admin"
+)
+
+printf "%-14s %-16s %-9s %-9s %-40s\n" "VM" "IP" "BINARIO" "DISCO" "PORTAS ATIVAS (papel)"
+printf "%-14s %-16s %-9s %-9s %-40s\n" "----" "--" "-------" "-----" "---------------------"
+
+for vm in "${VM_NAMES[@]}"; do
+    ip="${VM_IP[$vm]}"
+    if ! REMOTE_OUT=$(ssh -n $SSH_OPTS -J "${VM_USER}@${ROUTER_WAN_IP}" "${VM_USER}@${ip}" '
+            command -v weed >/dev/null 2>&1 && echo "BIN:ok" || echo "BIN:falta"
+            mountpoint -q /data && echo "DISK:ok" || echo "DISK:falta"
+            ss -Hltn 2>/dev/null | awk "{print \$4}" | grep -oE "[0-9]+\$" | sort -u
+        ' 2>/dev/null); then
+        printf "%-14s %-16s %-9s %-9s %-40s\n" "$vm" "$ip" "?" "?" "SSH indisponível (VM ainda de boot?)"
+        continue
+    fi
+
+    BIN=$(grep -oP '(?<=BIN:)\w+' <<<"$REMOTE_OUT")
+    DISK=$(grep -oP '(?<=DISK:)\w+' <<<"$REMOTE_OUT")
+
+    ROLES=""
+    while read -r p; do
+        [[ -z "$p" ]] && continue
+        role="${PORT_ROLE[$p]:-}"
+        [[ -n "$role" ]] && ROLES+="${p}(${role}) "
+    done <<<"$(grep -E '^[0-9]+$' <<<"$REMOTE_OUT")"
+    [[ -z "$ROLES" ]] && ROLES="nenhum serviço weed ativo"
+
+    printf "%-14s %-16s %-9s %-9s %-40s\n" "$vm" "$ip" "$BIN" "$DISK" "$ROLES"
+done
+echo "(papel por porta: 9333=master  8080=volume  8888=filer  8333=S3  23646=admin)"
+echo
 echo "Acesso ao roteador (direto, via WAN):"
 echo "  ssh ${VM_USER}@${ROUTER_WAN_IP}"
 echo
