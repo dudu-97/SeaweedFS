@@ -153,15 +153,38 @@ for vm in "${VM_NAMES[@]}"; do
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed filer -master=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -defaultStoreDir=${DATA_MOUNT_DIR}/filer -s3 -s3.port=${SEAWEED_S3_PORT}
+      ExecStart=/usr/local/bin/weed filer -master=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -defaultStoreDir=${DATA_MOUNT_DIR}/filer -s3 -s3.config=${DATA_MOUNT_DIR}/filer/s3.json -s3.port=${SEAWEED_S3_PORT}
       Restart=on-failure
       RestartSec=5
 
       [Install]
       WantedBy=multi-user.target
+
+  # Identidade S3 (accessKey/secretKey de 00-config.env). Escrita em
+  # /root (existe desde o boot) em vez de \${DATA_MOUNT_DIR}/filer
+  # diretamente: write_files roda ANTES do runcmd que monta o disco de
+  # dados, então gravar direto no destino final ficaria escondido pelo
+  # mount que vem depois -- o runcmd abaixo copia para o lugar certo
+  # só depois do mount.
+  - path: /root/s3.json
+    permissions: '0600'
+    content: |
+      {
+        \"identities\": [
+          {
+            \"name\": \"labuser\",
+            \"credentials\": [
+              {\"accessKey\": \"${S3_ACCESS_KEY}\", \"secretKey\": \"${S3_SECRET_KEY}\"}
+            ],
+            \"actions\": [\"Admin\", \"Read\", \"Write\"]
+          }
+        ]
+      }
 "
         WEED_RUNCMD+="
   - mkdir -p ${DATA_MOUNT_DIR}/filer
+  - cp /root/s3.json ${DATA_MOUNT_DIR}/filer/s3.json
+  - chmod 600 ${DATA_MOUNT_DIR}/filer/s3.json
   - systemctl daemon-reload
   - systemctl enable --now weed-filer.service"
     fi

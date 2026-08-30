@@ -68,7 +68,15 @@ for vm in "${VM_NAMES[@]}"; do
     for c in "${CHECKS[@]}"; do
         port="${c%%:*}"; role="${c##*:}"
         code=$(grep -oP "(?<=HTTP:${port}:)\d+" <<<"$REMOTE_OUT")
-        [[ "$code" == "200" ]] && ST="UP" || { ST="DOWN"; ANY_DOWN=1; }
+        if [[ "$role" == "s3" ]]; then
+            # com -s3.config (identidade obrigatória), a checagem acima é
+            # um GET anônimo/não assinado de propósito -- 403 aqui é o
+            # gateway respondendo e recusando corretamente por falta de
+            # assinatura, não um serviço fora do ar.
+            [[ "$code" == "200" || "$code" == "403" ]] && ST="UP" || { ST="DOWN"; ANY_DOWN=1; }
+        else
+            [[ "$code" == "200" ]] && ST="UP" || { ST="DOWN"; ANY_DOWN=1; }
+        fi
         if [[ "$FIRST" == "1" ]]; then
             printf "%-14s %-9s %-9s %-9s %-7s %-6s %-8s\n" "$vm" "$BIN" "$DISK" "$role" "$port" "$code" "$ST"
             FIRST=0

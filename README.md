@@ -126,7 +126,7 @@ Todos são idempotentes: se um disco, VM ou rede já existe, o script avisa e se
 | swfs-master1/2/3 | master | 9333 | `/cluster/status` | HTTP 200 |
 | swfs-vol1, swfs-vol2 | volume | 8080 | `/status` | HTTP 200 |
 | swfs-vol1 | filer | 8888 | `/` | HTTP 200 |
-| swfs-vol1 | S3 API | 8333 | `/` (list buckets) | HTTP 200 |
+| swfs-vol1 | S3 API | 8333 | `/` (list buckets) | HTTP 200 (sem credenciais) ou 403 (com `-s3.config`, veja abaixo) |
 | swfs-vol1 | admin (dashboard web) | 23646 | `/` | HTTP 200 |
 
 Saída esperada logo após o deploy:
@@ -142,14 +142,20 @@ swfs-vol1      ok        ok        volume    8080    200    UP
 swfs-vol2      ok        ok        volume    8080    200    UP
 ```
 
-A API S3 não exige credenciais por padrão (nenhum `-s3.config` foi passado) — é o modo esperado para um lab, não para produção. Teste rápido de dentro de qualquer VM do cluster, sem depender de nenhum cliente S3 instalado:
+A API S3 exige credenciais: o `weed-filer` sobe com `-s3.config=/data/filer/s3.json`, um arquivo gerado pelo próprio cloud-init com a identidade definida em `00-config.env` (`S3_ACCESS_KEY`/`S3_SECRET_KEY`, valores fixos de lab — troque antes de expor isso fora do seu host). Sem esse arquivo, o gateway aceitaria qualquer requisição não assinada — jeito mais simples de começar, mas nenhum cliente S3 de verdade (`mc`, `aws s3`, `rclone`, SDKs) manda requisição não assinada, então a identidade já vem configurada de fábrica para evitar esse obstáculo.
 
+Teste rápido de dentro de qualquer VM do cluster, sem depender de nenhum cliente S3 instalado — um GET anônimo retorna `403 Access Denied` (esperado, é o gateway recusando por falta de assinatura, não um sinal de que o serviço está fora do ar):
 ```bash
-curl -s http://192.168.100.21:8333/          # XML do ListBuckets (lista vazia no início)
-curl -s http://192.168.100.21:8888/          # UI do Filer
+curl -s http://192.168.100.21:8333/          # 403 AccessDenied (sem credenciais)
+curl -s http://192.168.100.21:8888/          # UI do Filer (não exige S3 auth)
 ```
 
-Para um cliente S3 de verdade (`aws s3`, `mc`, etc.), instale o pacote correspondente na VM e aponte o `--endpoint-url`/alias para `http://192.168.100.21:8333`.
+Para um cliente S3 de verdade (`aws s3`, `mc`, etc.), instale o pacote correspondente na VM, aponte o `--endpoint-url`/alias para `http://192.168.100.21:8333` e use o access/secret key de `00-config.env`. Exemplo com `mc`:
+```bash
+mc alias set swfslab http://192.168.100.21:8333 "$S3_ACCESS_KEY" "$S3_SECRET_KEY"
+mc mb swfslab/meu-bucket
+mc cp algum-arquivo swfslab/meu-bucket/
+```
 
 O `weed admin` (dashboard web, `swfs-vol1:23646`) mostra topologia do cluster, volumes, métricas e navegador de arquivos — descobre o filer automaticamente pelos masters, sem configuração adicional. Para abrir no navegador do host, um túnel SSH pelo roteador:
 ```bash
@@ -225,4 +231,4 @@ Dois comportamentos não documentados foram encontrados montando este lab e vale
 
 ## Reconfigurar
 
-Tudo está centralizado em `00-config.env`: nomes/IP/MAC das VMs e do roteador, RAM/vCPU, tamanho dos discos, usuário/senha, papéis do SeaweedFS (`FILER_HOST`, `VM_RACK`, portas), versão do SeaweedFS (`SEAWEED_VERSION` — `latest` ou uma tag fixa) e diretórios (`LAB_DIR`, `IMAGES_DIR`).
+Tudo está centralizado em `00-config.env`: nomes/IP/MAC das VMs e do roteador, RAM/vCPU, tamanho dos discos, usuário/senha, papéis do SeaweedFS (`FILER_HOST`, `VM_RACK`, portas), credenciais da API S3 (`S3_ACCESS_KEY`, `S3_SECRET_KEY`), versão do SeaweedFS (`SEAWEED_VERSION` — `latest` ou uma tag fixa) e diretórios (`LAB_DIR`, `IMAGES_DIR`).
