@@ -9,11 +9,11 @@
 #       * /etc/hosts com todas as VMs + o roteador
 #       * ~/.ssh/config sem prompt de host key entre os nós do lab
 #       * disco de dados formatado/montado em /data (dono = usuário)
-#       * binário `weed` já baixado e instalado em /usr/local/bin
-#     (o único passo manual que sobra é rodar os comandos `weed
-#     master/volume/filer/admin` -- veja README > Próximos passos)
+#       * binário `weed` baixado e instalado em /usr/local/bin
+#       * o(s) serviço(s) systemd do papel da VM já habilitados e rodando
+#         (weed-master / weed-volume / weed-filer+S3, conforme o papel)
 #
-# A VM swfs-router (BSD) NÃO entra aqui: ela é instalada manualmente.
+# A VM swfs-router é gerada logo abaixo, também via cloud-init.
 # =====================================================================
 set -euo pipefail
 
@@ -74,12 +74,97 @@ for vm in "${VM_NAMES[@]}"; do
     HOSTS_ENTRIES+="${VM_IP[$vm]} ${vm} ${vm}.${LAB_DOMAIN}"$'\n'
 done
 
+# --- lista de masters (ip:porta), usada por master/volume/filer -------
+MASTER_PEERS=""
+for vm in "${VM_NAMES[@]}"; do
+    [[ "$vm" == *master* ]] && MASTER_PEERS+="${VM_IP[$vm]}:${SEAWEED_MASTER_PORT},"
+done
+MASTER_PEERS="${MASTER_PEERS%,}"
+log "Masters do cluster: $MASTER_PEERS"
+
 for vm in "${VM_NAMES[@]}"; do
     VM_DIR="$LAB_DIR/$vm"
     mkdir -p "$VM_DIR"
 
     PRIVKEY_INDENTED=$(printf '%s\n' "$CLUSTER_PRIVKEY" | indent "      ")
     HOSTS_INDENTED=$(printf '%s' "$HOSTS_ENTRIES" | indent "      ")
+
+    # --- unidades systemd + runcmd do(s) papel(is) desta VM -----------
+    # Escritas em /etc (não em $HOME), então não precisam de "defer".
+    WEED_UNITS=""
+    WEED_RUNCMD=""
+
+    if [[ "$vm" == *master* ]]; then
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-master.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS Master
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed master -mdir=${DATA_MOUNT_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - mkdir -p ${DATA_MOUNT_DIR}/master
+  - systemctl daemon-reload
+  - systemctl enable --now weed-master.service"
+    fi
+
+    if [[ "$vm" == *vol* ]]; then
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-volume.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS Volume Server
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed volume -dir=${DATA_MOUNT_DIR}/volume -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${SEAWEED_VOLUME_PORT}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - mkdir -p ${DATA_MOUNT_DIR}/volume
+  - systemctl daemon-reload
+  - systemctl enable --now weed-volume.service"
+    fi
+
+    if [[ "$vm" == "$FILER_HOST" ]]; then
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-filer.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS Filer + API S3
+      After=network-online.target weed-volume.service
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed filer -master=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -defaultStoreDir=${DATA_MOUNT_DIR}/filer -s3 -s3.port=${SEAWEED_S3_PORT}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - mkdir -p ${DATA_MOUNT_DIR}/filer
+  - systemctl daemon-reload
+  - systemctl enable --now weed-filer.service"
+    fi
 
     cat > "$VM_DIR/user-data" <<EOF
 #cloud-config
@@ -146,7 +231,7 @@ ${PRIVKEY_INDENTED}
       Host swfs-* 192.168.100.*
         StrictHostKeyChecking no
         UserKnownHostsFile /dev/null
-
+${WEED_UNITS}
 runcmd:
   - systemctl enable --now ssh
   - chown -R ${VM_USER}:${VM_USER} /home/${VM_USER}/.ssh
@@ -161,10 +246,11 @@ runcmd:
   - mount -a
   - chown ${VM_USER}:${VM_USER} ${DATA_MOUNT_DIR}
 
-  # --- binário do SeaweedFS pré-instalado, pronto para "weed master/
-  # volume/filer/admin" (passo manual, veja README > Próximos passos)
-  - [ bash, -c, "command -v weed >/dev/null 2>&1 || curl -fsSL '${SEAWEED_DOWNLOAD_URL}' | tar -xz -C /usr/local/bin weed" ]
+  # --- binário do SeaweedFS: baixa com retry (o roteador pode ainda
+  # estar de boot quando esta VM já tenta a internet) e instala.
+  - [ bash, -c, "command -v weed >/dev/null 2>&1 || { i=0; until curl -fsSL -o /tmp/weed.tar.gz '${SEAWEED_DOWNLOAD_URL}' || [ \$i -ge 36 ]; do i=\$((i+1)); sleep 5; done; tar -xzf /tmp/weed.tar.gz -C /usr/local/bin weed && rm -f /tmp/weed.tar.gz; }" ]
   - [ bash, -c, "weed version || true" ]
+${WEED_RUNCMD}
 EOF
 
     cat > "$VM_DIR/meta-data" <<EOF
