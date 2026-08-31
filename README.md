@@ -38,7 +38,7 @@ A rede `seaweedfs-lab` é um switch L2 isolado no libvirt — sem DHCP, sem NAT,
 
 Por que 3 masters e 2 volumes em vez de uma topologia mínima:
 - **3 masters** — o SeaweedFS usa Raft para eleger o master líder. Com um único master não há eleição nem failover para observar, que é um dos comportamentos mais didáticos do sistema.
-- **2 volume servers em racks diferentes** — permite testar as regras de replicação do SeaweedFS (`-replication 001`, `010`, etc.), que decidem em qual rack/datacenter uma réplica pode ficar.
+- **2 volume servers em racks diferentes** — permite testar as regras de replicação do SeaweedFS (`-replication 010`, `100`, etc.), que decidem em qual rack/datacenter uma réplica pode ficar.
 - **Filer + S3 embutidos em swfs-vol1** — evita uma VM dedicada só para isso; o Filer (namespace hierárquico) e a API S3 já ficam disponíveis sem custo extra de máquina.
 
 ## Requisitos
@@ -71,7 +71,7 @@ Uma introdução rápida ao vocabulário usado no restante deste documento:
 - **Volume / Volume Server** — a unidade real de armazenamento. Um *volume* é um arquivo grande onde o SeaweedFS empacota muitos arquivos pequenos ("needles") lado a lado, evitando o overhead de um filesystem tradicional por arquivo. O *volume server* é o processo que serve um ou mais volumes (`8080`) e informa ao master a qual **rack**/**datacenter** pertence — informação usada nas regras de replicação.
 - **Filer** — camada opcional acima dos volumes que adiciona um namespace hierárquico (pastas/arquivos, como um filesystem POSIX) em vez de IDs de arquivo crus. Guarda seus próprios metadados (aqui, em LevelDB local) e expõe uma API HTTP em `8888`.
 - **S3 API** — gateway compatível com o protocolo S3 da AWS, embutido no processo do Filer (`-s3`). Permite usar clientes/SDKs S3 comuns (`aws s3`, `mc`, boto3...) apontando para `8333`, sem precisar de um serviço externo.
-- **Replicação** — configurada por volume (flag `-replication`, ex. `001`), decide quantas cópias existem e se elas podem ficar no mesmo rack, datacenter, ou obrigatoriamente separadas — é aqui que ter 2 volume servers em racks diferentes se torna útil neste lab.
+- **Replicação** — configurada por volume (flag `-replication`, um código de 3 dígitos **datacenter-rack-node**, ex. `010` = 1 cópia extra em outro rack), decide quantas cópias existem e se elas podem ficar no mesmo rack, datacenter, ou obrigatoriamente separadas — é aqui que ter 2 volume servers em racks diferentes se torna útil neste lab (ver RELATORIO.md para a tabela completa dos códigos, confirmada ao vivo direto pelas mensagens de erro do master). **Sem essa flag, o padrão do SeaweedFS é `000` — nenhuma cópia extra**: os dois volume servers só somam capacidade (o master distribui volumes novos entre os racks pra balancear espaço), cada arquivo vive em um volume só, sem redundância. `./deploy-lab.sh` pergunta o modelo de replicação padrão do cluster antes de gerar o cloud-init (ver seção "Deploy" abaixo) — a escolha vira a flag `-defaultReplication` no `weed master`, valendo pra todo upload que não pedir uma replicação explícita.
 
 ## Passo a passo
 
@@ -95,7 +95,7 @@ O script executa, em sequência:
 1. **`01-baixar-imagem.sh`** — baixa a cloud image Ubuntu 24.04 para `Imagens/` (uma vez; reaproveitada pelas 5 VMs e pelo roteador).
 2. **`02-criar-discos.sh`** — cria o disco de sistema e o de dados de cada VM do cluster, e o disco do roteador (todos como overlay da mesma imagem-base).
 3. **`03-configurar-rede.sh`** — cria a rede isolada `seaweedfs-lab` e reserva o IP fixo do roteador na rede `default`.
-4. **`04-gerar-cloud-init.sh`** — gera a chave SSH do cluster e o seed cloud-init de cada VM. Nas 5 VMs do cluster, o cloud-init resultante já inclui: IP estático, disco de dados formatado e montado em `/data`, o binário `weed` baixado, e o(s) serviço(s) systemd do papel da VM (`weed-master`, `weed-volume` e/ou `weed-filer`) habilitados para iniciar no boot.
+4. **`04-gerar-cloud-init.sh`** — **pergunta interativamente o modelo de replicação padrão do cluster** (`000` = nenhuma, só soma capacidade de vol1+vol2; `010` = 1 cópia extra em outro rack — Enter mantém `000`), depois gera a chave SSH do cluster e o seed cloud-init de cada VM. Nas 5 VMs do cluster, o cloud-init resultante já inclui: IP estático, disco de dados formatado e montado em `/data`, o binário `weed` baixado, e o(s) serviço(s) systemd do papel da VM (`weed-master` com a replicação escolhida, `weed-volume` e/ou `weed-filer`) habilitados para iniciar no boot. Rodado de forma não-interativa (stdin não é terminal), assume `000` sem perguntar.
 5. **`05-criar-vms.sh`** — sobe o roteador primeiro (as demais VMs precisam de internet já no primeiro boot) e depois as 5 VMs do cluster.
 6. **`06-status.sh`** — mostra o estado de cada VM e faz uma checagem HTTP em cada serviço do SeaweedFS.
 
@@ -128,6 +128,7 @@ Todos são idempotentes: se um disco, VM ou rede já existe, o script avisa e se
 | swfs-vol1 | filer | 8888 | `/` | HTTP 200 |
 | swfs-vol1 | S3 API | 8333 | `/` (list buckets) | HTTP 200 (sem credenciais) ou 403 (com `-s3.config`, veja abaixo) |
 | swfs-vol1 | admin (dashboard web) | 23646 | `/` | HTTP 200 |
+| swfs-vol1 | página de demo de upload S3 | 8090 | `/` | HTTP 200 |
 
 Saída esperada logo após o deploy:
 
@@ -138,7 +139,9 @@ swfs-master2   ok        ok        master    9333    200    UP
 swfs-master3   ok        ok        master    9333    200    UP
 swfs-vol1      ok        ok        volume    8080    200    UP
                filer     8888      200       UP
-               s3        8333      200       UP
+               s3        8333      403       UP
+               admin     23646     200       UP
+               upload-demo 8090    200       UP
 swfs-vol2      ok        ok        volume    8080    200    UP
 ```
 
@@ -157,11 +160,12 @@ mc mb swfslab/meu-bucket
 mc cp algum-arquivo swfslab/meu-bucket/
 ```
 
-O `weed admin` (dashboard web, `swfs-vol1:23646`) mostra topologia do cluster, volumes, métricas e navegador de arquivos — descobre o filer automaticamente pelos masters, sem configuração adicional. Para abrir no navegador do host, um túnel SSH pelo roteador:
+O `weed admin` (dashboard web, `swfs-vol1:23646`) mostra topologia do cluster, volumes, métricas e navegador de arquivos — descobre o filer automaticamente pelos masters, sem configuração adicional. A `swfs-vol1` também serve uma **página estática de demo de upload S3** (porta 8090) — HTML+JS puro com o AWS SDK via CDN, já com o access/secret key de `00-config.env` preenchidos, útil para entender na prática como uma aplicação fala com o bucket sem precisar escrever código. Para abrir os dois no navegador do host, um túnel SSH pelo roteador cobrindo as três portas relevantes:
 ```bash
-ssh -L 23646:192.168.100.21:23646 -o ProxyCommand="ssh -W %h:%p swfs@192.168.122.150" swfs@192.168.100.21
+ssh -N -L 23646:192.168.100.21:23646 -L 8090:192.168.100.21:8090 -L 8333:192.168.100.21:8333 \
+    -o ProxyCommand="ssh -W %h:%p swfs@192.168.122.150" swfs@192.168.100.21
 ```
-e depois acesse `http://localhost:23646` no host. Sem `-adminPassword`, a autenticação fica desabilitada — aceitável só para lab.
+e depois acesse `http://localhost:23646` (admin) ou `http://localhost:8090` (demo de upload) no host — a demo detecta sozinha, pelo host da própria URL, que o S3 também está em `localhost:8333` graças ao túnel. Sem `-adminPassword`, a autenticação do admin fica desabilitada — aceitável só para lab.
 
 ## Acesso SSH
 
@@ -231,4 +235,4 @@ Dois comportamentos não documentados foram encontrados montando este lab e vale
 
 ## Reconfigurar
 
-Tudo está centralizado em `00-config.env`: nomes/IP/MAC das VMs e do roteador, RAM/vCPU, tamanho dos discos, usuário/senha, papéis do SeaweedFS (`FILER_HOST`, `VM_RACK`, portas), credenciais da API S3 (`S3_ACCESS_KEY`, `S3_SECRET_KEY`), versão do SeaweedFS (`SEAWEED_VERSION` — `latest` ou uma tag fixa) e diretórios (`LAB_DIR`, `IMAGES_DIR`).
+Tudo está centralizado em `00-config.env`: nomes/IP/MAC das VMs e do roteador, RAM/vCPU, tamanho dos discos, usuário/senha, papéis do SeaweedFS (`FILER_HOST`, `ADMIN_HOST`, `UPLOAD_DEMO_HOST`, `VM_RACK`, portas), credenciais da API S3 (`S3_ACCESS_KEY`, `S3_SECRET_KEY`), versão do SeaweedFS (`SEAWEED_VERSION` — `latest` ou uma tag fixa) e diretórios (`LAB_DIR`, `IMAGES_DIR`). O modelo de replicação padrão não fica fixo no `00-config.env` — é perguntado interativamente a cada `./04-gerar-cloud-init.sh` (direto ou via `deploy-lab.sh`), porque normalmente é a primeira coisa que muda de um teste pro outro.

@@ -24,6 +24,34 @@ log()  { echo -e "\e[1;32m[+]\e[0m $*"; }
 warn() { echo -e "\e[1;33m[!]\e[0m $*"; }
 die()  { echo -e "\e[1;31m[x]\e[0m $*" >&2; exit 1; }
 
+# --- modelo de replicação padrão do cluster (-defaultReplication no master) ---
+# Pergunta ANTES do deploy, porque não dá pra trocar depois sem reiniciar os
+# masters (e redistribuir os volumes já criados). Sem isso, o SeaweedFS usa
+# "000" por padrão -- só soma a capacidade de vol1+vol2, sem nenhuma cópia
+# extra (testado e documentado no RELATORIO.md desta sessão). O código tem
+# 3 dígitos -- datacenter/rack/node, confirmado ao vivo pela própria
+# mensagem de erro do master ("001"->{"node":1}, "010"->{"rack":1},
+# "100"->{"dc":1}) -- por isso é "010" que replica em outro RACK, não
+# "001" (esse pediria outro SERVIDOR no mesmo rack, que este lab não tem).
+# Nesta topologia (1 datacenter, 2 racks, 1 volume server por rack), só
+# "000" e "010" fazem sentido de verdade -- os demais códigos exigiriam
+# mais racks/datacenters/servidores do que o lab tem.
+if [[ -t 0 ]]; then
+    echo
+    echo "Qual modelo de replicação padrão o cluster deve usar?"
+    echo "  1) 000 - nenhuma (padrão do SeaweedFS) - soma a capacidade de vol1+vol2, sem redundância"
+    echo "  2) 010 - 1 cópia extra em outro rack - todo arquivo grava em vol1 E replica em vol2 (ou vice-versa)"
+    read -r -p "Escolha [1/2] (Enter = 1, mesmo comportamento de antes): " REPLICATION_CHOICE
+    case "$REPLICATION_CHOICE" in
+        2) MASTER_DEFAULT_REPLICATION="010" ;;
+        *) MASTER_DEFAULT_REPLICATION="000" ;;
+    esac
+else
+    warn "Stdin não é um terminal (execução não-interativa) -- usando replicação padrão 000."
+    MASTER_DEFAULT_REPLICATION="000"
+fi
+log "Replicação padrão do cluster: -defaultReplication=$MASTER_DEFAULT_REPLICATION"
+
 SEED_TOOL=""
 if command -v cloud-localds >/dev/null 2>&1; then
     SEED_TOOL="cloud-localds"
@@ -82,6 +110,160 @@ done
 MASTER_PEERS="${MASTER_PEERS%,}"
 log "Masters do cluster: $MASTER_PEERS"
 
+# --- página estática de demo de upload S3 (servida em $UPLOAD_DEMO_HOST) --
+# Heredoc com aspas ('ENDHTML') de propósito: o JS abaixo usa template
+# literals (`${bucket}`, `${file.name}`...) que NÃO podem passar pela
+# expansão do bash do heredoc principal do user-data (que não é quotado,
+# porque outros campos como ${VM_IP[$vm]} precisam ser expandidos). Aqui
+# só os dois placeholders __S3_ACCESS_KEY__/__S3_SECRET_KEY__ são trocados
+# manualmente depois, o resto do arquivo fica literal.
+UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Demo de upload — SeaweedFS S3</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  fieldset { border: 1px solid #ccc; border-radius: 6px; margin-bottom: 20px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: block; margin-top: 10px; font-size: 0.85rem; color: #444; }
+  input[type=text], input[type=password] { width: 100%; padding: 6px 8px; margin-top: 2px; box-sizing: border-box; font-family: monospace; }
+  button { margin-top: 14px; padding: 8px 16px; cursor: pointer; }
+  #log { background: #111; color: #0f0; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 6px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #ddd; font-size: 0.85rem; }
+  .warn { background: #fff3cd; border: 1px solid #ffe69c; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+
+<h1>Demo de upload — bucket S3 do SeaweedFS</h1>
+
+<div class="warn">
+  <strong>Só para aprendizado.</strong> Esta página coloca a secret key
+  direto no JavaScript do navegador — qualquer app "de verdade" (Veeam,
+  backend, etc.) faz esse mesmo tipo de chamada, mas guarda a credencial no
+  servidor/aplicativo, nunca visível num navegador.
+</div>
+
+<fieldset>
+  <legend>1. Como o cliente S3 se conecta</legend>
+  <label>Endpoint (URL do gateway S3)
+    <input type="text" id="endpoint" value="">
+  </label>
+  <label>Bucket (crie antes com "mc mb", esta página não cria bucket)
+    <input type="text" id="bucket" value="meu-bucket-teste">
+  </label>
+  <label>Access Key
+    <input type="text" id="accessKey" value="__S3_ACCESS_KEY__">
+  </label>
+  <label>Secret Key
+    <input type="password" id="secretKey" value="__S3_SECRET_KEY__">
+  </label>
+  <button onclick="connect()">Conectar</button>
+</fieldset>
+
+<fieldset>
+  <legend>2. Upload</legend>
+  <input type="file" id="fileInput">
+  <br>
+  <button onclick="upload()">Enviar arquivo</button>
+</fieldset>
+
+<fieldset>
+  <legend>3. Objetos no bucket</legend>
+  <button onclick="listObjects()">Listar</button>
+  <table id="objTable">
+    <thead><tr><th>Chave</th><th>Tamanho</th><th>Modificado</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</fieldset>
+
+<fieldset>
+  <legend>Log (o que a página está mandando pro S3, passo a passo)</legend>
+  <div id="log"></div>
+</fieldset>
+
+<script src="https://cdn.jsdelivr.net/npm/aws-sdk@2.1691.0/dist/aws-sdk.min.js"></script>
+<script>
+let s3 = null;
+
+// endpoint padrão: mesmo host de onde esta página foi carregada, porta do
+// gateway S3 -- funciona tanto acessando via túnel (localhost) quanto de
+// dentro da rede do lab (IP da VM), sem precisar editar a página.
+document.getElementById('endpoint').value = window.location.protocol + '//' + window.location.hostname + ':8333';
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const time = new Date().toLocaleTimeString();
+  el.textContent += `[${time}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function connect() {
+  const endpoint = document.getElementById('endpoint').value.trim();
+  const accessKeyId = document.getElementById('accessKey').value.trim();
+  const secretAccessKey = document.getElementById('secretKey').value.trim();
+
+  AWS.config.update({ accessKeyId, secretAccessKey, region: 'us-east-1' });
+
+  s3 = new AWS.S3({
+    endpoint: new AWS.Endpoint(endpoint),
+    s3ForcePathStyle: true,   // essencial: SeaweedFS não faz virtual-hosted-style (bucket.dominio.com)
+    signatureVersion: 'v4',
+  });
+
+  log(`Cliente S3 configurado: endpoint=${endpoint}, path-style=true, accessKey=${accessKeyId}`);
+  log('Pronto para enviar/listar. Toda chamada abaixo é HTTP assinado com AWS Signature V4 — mesmo protocolo que o Veeam usa por baixo dos panos.');
+}
+
+function upload() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const file = document.getElementById('fileInput').files[0];
+  if (!file) { log('ERRO: escolha um arquivo primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+
+  log(`PUT ${bucket}/${file.name} (${file.size} bytes, ${file.type || 'application/octet-stream'})...`);
+  s3.putObject({
+    Bucket: bucket,
+    Key: file.name,
+    Body: file,
+    ContentType: file.type || 'application/octet-stream',
+  }, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    log(`OK — ETag=${data.ETag}`);
+    listObjects();
+  });
+}
+
+function listObjects() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+
+  log(`GET ${bucket}/?list-type=2 (ListObjectsV2)...`);
+  s3.listObjectsV2({ Bucket: bucket }, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    const tbody = document.querySelector('#objTable tbody');
+    tbody.innerHTML = '';
+    (data.Contents || []).forEach(obj => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${obj.Key}</td><td>${obj.Size} B</td><td>${new Date(obj.LastModified).toLocaleString()}</td>`;
+      tbody.appendChild(tr);
+    });
+    log(`OK — ${(data.Contents || []).length} objeto(s) no bucket.`);
+  });
+}
+</script>
+
+</body>
+</html>
+ENDHTML
+)
+UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
+UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
+
 for vm in "${VM_NAMES[@]}"; do
     VM_DIR="$LAB_DIR/$vm"
     mkdir -p "$VM_DIR"
@@ -105,7 +287,7 @@ for vm in "${VM_NAMES[@]}"; do
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed master -mdir=${DATA_MOUNT_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS}
+      ExecStart=/usr/local/bin/weed master -mdir=${DATA_MOUNT_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS} -defaultReplication=${MASTER_DEFAULT_REPLICATION}
       Restart=on-failure
       RestartSec=5
 
@@ -213,6 +395,36 @@ for vm in "${VM_NAMES[@]}"; do
   - systemctl enable --now weed-admin.service"
     fi
 
+    if [[ "$vm" == "$UPLOAD_DEMO_HOST" ]]; then
+        UPLOAD_DEMO_HTML_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_HTML" | indent "      ")
+        WEED_UNITS+="
+  - path: /var/www/upload-demo/index.html
+    permissions: '0644'
+    content: |
+${UPLOAD_DEMO_HTML_INDENTED}
+
+  - path: /etc/systemd/system/weed-upload-demo.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Pagina de demo de upload S3 (estatica, so para teste)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      WorkingDirectory=/var/www/upload-demo
+      ExecStart=/usr/bin/python3 -m http.server ${SEAWEED_UPLOAD_DEMO_PORT}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - systemctl daemon-reload
+  - systemctl enable --now weed-upload-demo.service"
+    fi
+
     cat > "$VM_DIR/user-data" <<EOF
 #cloud-config
 hostname: ${vm}
@@ -223,6 +435,7 @@ packages:
   - curl
   - tar
   - e2fsprogs
+  - python3
 
 users:
   - default

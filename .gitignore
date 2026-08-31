@@ -18,6 +18,7 @@
 
 # Doc pessoal de labs/testes — fica só no PC, não faz parte do lab em si
 /LABS-TESTES-S3.md
+/PROXIMOS-TESTES.md
 
 # Demo local de upload S3 (tem a secret key do lab preenchida no HTML)
 /upload-demo/

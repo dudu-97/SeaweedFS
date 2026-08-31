@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 620" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <rect x="0" y="0" width="1040" height="620" fill="#ffffff"/>
+
+  <text x="20" y="34" font-size="20" font-weight="700" fill="#111">Limpeza dos dados de teste — comando (swfs-router) → log real (weed-filer, swfs-vol1)</text>
+  <text x="20" y="54" font-size="12" fill="#555">journalctl -u weed-filer -f — 30/08/2026, 19:26 a 20:18</text>
+
+  <!-- column headers -->
+  <text x="20" y="86" font-size="13" font-weight="700" fill="#2b5fa8">COMANDO (mc, terminal do usuário)</text>
+  <text x="560" y="86" font-size="13" font-weight="700" fill="#1a7a4c">EVENTO NO LOG (servidor)</text>
+
+  <!-- connector column line -->
+  <line x1="540" y1="100" x2="540" y2="560" stroke="#ddd" stroke-width="1"/>
+
+  <!-- Row 1 -->
+  <rect x="20" y="100" width="500" height="46" rx="6" fill="#eaf1fb" stroke="#2b5fa8"/>
+  <text x="32" y="120" font-size="12.5" fill="#1a1a1a">mc rm --recursive --force</text>
+  <text x="32" y="136" font-size="12.5" fill="#1a1a1a">swfslab/meu-bucket-teste/parallel-test</text>
+
+  <rect x="560" y="100" width="460" height="46" rx="6" fill="#eaf8ef" stroke="#1a7a4c"/>
+  <text x="572" y="116" font-size="11.5" fill="#333">20:00:07 empty_folder_cleaner.go</text>
+  <text x="572" y="132" font-size="11.5" fill="#333">"deleting empty folder .../parallel-test</text>
+  <text x="572" y="146" font-size="11.5" fill="#333">(triggered by arquivo_25.bin)"</text>
+
+  <line x1="520" y1="123" x2="560" y2="123" stroke="#999" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Row 2 -->
+  <rect x="20" y="172" width="500" height="46" rx="6" fill="#eaf1fb" stroke="#2b5fa8"/>
+  <text x="32" y="192" font-size="12.5" fill="#1a1a1a">mc rb --force swfslab/bucket-imutavel</text>
+  <text x="32" y="208" font-size="11.5" fill="#555">(depois de purgar versões travadas com --bypass)</text>
+
+  <rect x="560" y="172" width="460" height="46" rx="6" fill="#eaf8ef" stroke="#1a7a4c"/>
+  <text x="572" y="192" font-size="11.5" fill="#333">19:59:37 metrics.go</text>
+  <text x="572" y="208" font-size="11.5" fill="#333">"delete bucket metrics, bucket-imutavel: 18 → 0"</text>
+
+  <line x1="520" y1="195" x2="560" y2="195" stroke="#999" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Row 3 -->
+  <rect x="20" y="244" width="500" height="46" rx="6" fill="#eaf1fb" stroke="#2b5fa8"/>
+  <text x="32" y="264" font-size="12.5" fill="#1a1a1a">mc rb --force swfslab/bucket-compliance</text>
+  <text x="32" y="280" font-size="11.5" fill="#555">(bucket vazio, sem objeto)</text>
+
+  <rect x="560" y="244" width="460" height="66" rx="6" fill="#eaf8ef" stroke="#1a7a4c"/>
+  <text x="572" y="260" font-size="11.5" fill="#333">20:00:19 metrics.go</text>
+  <text x="572" y="274" font-size="11.5" fill="#333">"delete bucket metrics, bucket-compliance: 12 → 0"</text>
+  <text x="572" y="290" font-size="11.5" fill="#333">20:02:37 empty_folder_cleaner.go</text>
+  <text x="572" y="304" font-size="11.5" fill="#333">"deleting empty folder /buckets/.system/owners/labuser"</text>
+
+  <line x1="520" y1="267" x2="560" y2="277" stroke="#999" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- Callout box: internal detail -->
+  <rect x="560" y="330" width="460" height="70" rx="6" fill="#fff8e6" stroke="#c8991f"/>
+  <text x="572" y="348" font-size="11.5" font-weight="700" fill="#7a5b00">Detalhe interno revelado pelo log:</text>
+  <text x="572" y="364" font-size="11" fill="#5a4400">o Filer mantém um índice oculto de "dono do bucket"</text>
+  <text x="572" y="378" font-size="11" fill="#5a4400">em /buckets/.system/owners/&lt;identidade&gt;/, limpo</text>
+  <text x="572" y="392" font-size="11" fill="#5a4400">automaticamente quando fica vazio.</text>
+
+  <!-- Noise box -->
+  <rect x="20" y="330" width="500" height="70" rx="6" fill="#f3f3f3" stroke="#999" stroke-dasharray="4,3"/>
+  <text x="32" y="348" font-size="11.5" font-weight="700" fill="#555">Ruído de fundo (ignorar, não é ação do teste):</text>
+  <text x="32" y="364" font-size="11" fill="#666">"the cluster has 1 filer" — heartbeat automático a cada 5 min</text>
+  <text x="32" y="378" font-size="11" fill="#666">(19:28, 19:33 ... 20:18), sem relação com a limpeza.</text>
+  <text x="32" y="392" font-size="11" fill="#666">Entradas de 19:26:55 = histórico de um erro anterior (capacidade).</text>
+
+  <!-- Legend -->
+  <rect x="20" y="430" width="14" height="14" fill="#eaf1fb" stroke="#2b5fa8"/>
+  <text x="40" y="441" font-size="11.5" fill="#333">Comando digitado pelo usuário (swfs-router)</text>
+  <rect x="20" y="452" width="14" height="14" fill="#eaf8ef" stroke="#1a7a4c"/>
+  <text x="40" y="463" font-size="11.5" fill="#333">Evento gerado pelo servidor (weed-filer, swfs-vol1)</text>
+  <rect x="20" y="474" width="14" height="14" fill="#f3f3f3" stroke="#999" stroke-dasharray="3,2"/>
+  <text x="40" y="485" font-size="11.5" fill="#333">Ruído / não relacionado ao teste</text>
+
+  <text x="20" y="520" font-size="12" font-weight="700" fill="#111">Conclusão do teste de limpeza:</text>
+  <text x="20" y="538" font-size="11.5" fill="#333">O Filer se comporta como um filesystem hierárquico de verdade — remove pastas vazias</text>
+  <text x="20" y="554" font-size="11.5" fill="#333">sozinho (EmptyFolderCleaner) e mantém contadores/índices internos por bucket e por</text>
+  <text x="20" y="570" font-size="11.5" fill="#333">identidade dona, tudo limpo automaticamente ao apagar o bucket.</text>
+
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#999"/>
+    </marker>
+  </defs>
+</svg>

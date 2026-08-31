@@ -179,6 +179,148 @@ Resumindo as duas camadas, pra não confundir de novo:
   **ainda em andamento**, no namespace do Filer. Visível no admin
   dashboard, some quando o upload termina.
 
+## 4. Teste de imutabilidade (S3 Object Lock / WORM)
+
+Refeito do zero depois de limpar os dados dos testes anteriores (o cluster
+tinha ficado com `Free: 0` volumes disponíveis — ver seção 2). Sequência:
+limpeza dos buckets/objetos de teste → conferência de capacidade → recriar
+buckets com Object Lock → testar GOVERNANCE e COMPLIANCE.
+
+### 4.1 Limpeza — log real do `weed-filer`
+
+![Comando -> log da limpeza](relatorio-assets/log-limpeza-weed-filer.svg)
+
+Achado: o Filer se comporta como um filesystem hierárquico de verdade —
+remove pastas vazias sozinho (`EmptyFolderCleaner`, disparado assim que o
+último arquivo de uma pasta é apagado) e mantém um índice interno de "quem
+é dono de qual bucket" em `/buckets/.system/owners/<identidade>/`, também
+limpo automaticamente quando fica vazio. Nenhum desses dois comportamentos
+foi pedido explicitamente — são manutenção automática do namespace do
+Filer.
+
+### 4.2 Capacidade após a limpeza
+
+```
+Max: 16 volumes (8 por rack × 2 racks)
+Volumes ainda existentes (meu-bucket-teste + avulsos): 14
+Free: 2
+```
+Apagar só o *objeto* não libera volume — só apagar o *bucket* (a
+collection inteira) libera. Por isso `Free` só voltou a subir depois do
+`mc rb`, não do `mc rm` dos arquivos.
+
+### 4.3 GOVERNANCE vs. COMPLIANCE
+
+O SeaweedFS implementa a mesma API de Object Lock da AWS: um bucket com
+versionamento habilitado (`--with-lock`) aceita uma regra de retenção por
+objeto ou por bucket, com dois modos possíveis.
+
+**GOVERNANCE** — confirmado ao vivo neste lab (seção 2 do relatório):
+- Bloqueia exclusão/sobrescrita da versão travada enquanto o prazo não
+  vence. Um `DELETE` normal (sem `--bypass`) numa versão travada retorna
+  `Access Denied`.
+- Pode ser anulado por uma identidade com permissão de bypass
+  (`s3:BypassGovernanceRetention` — aqui, a ação `Admin` do `s3.json`
+  cobre isso). Com `--bypass`, o delete é aceito.
+- Protege contra erro operacional e exclusão acidental, não contra um
+  administrador do próprio sistema — ele sempre pode anular se tiver a
+  permissão.
+
+**COMPLIANCE** — confirmado ao vivo, num reteste após limpar o ambiente
+(o primeiro teste tinha sido interrompido por falta de capacidade de
+volume, seção 2 — não por falha do Object Lock):
+- Mesmo mecanismo de prazo, mas sem nenhuma via de bypass — testado
+  apagando a versão travada com e **sem** `--bypass`: as duas tentativas
+  voltaram `Access Denied`. Nem admin, nem root, nem o próprio operador do
+  cluster consegue apagar ou sobrescrever a versão antes do prazo vencer.
+- É o modo usado quando existe uma exigência regulatória de retenção
+  (WORM) — registro financeiro, jurídico, de auditoria — porque a
+  garantia central é justamente que ninguém, nem sob pressão interna,
+  consegue alterar o dado durante o prazo.
+- Consequência prática: uma vez configurado em COMPLIANCE, nem o próprio
+  administrador do lab tem como desfazer antes do prazo — vale definir um
+  prazo curto em qualquer teste futuro. Confirmamos isso na prática: o
+  bucket de teste ficou preso até a retenção expirar, tivemos que esperar
+  para conseguir limpar o ambiente por completo (seção 6).
+
+## 5. Replicação — comportamento padrão do cluster
+
+Testado criando um bucket novo sem passar nenhuma flag de replicação:
+
+```json
+"replication": "000"
+```
+
+`000` é o código de 3 dígitos do SeaweedFS que decide onde ficam as
+cópias extras de cada arquivo — as três posições em zero significa
+**nenhuma cópia extra**, por padrão.
+
+**O que isso muda na prática:**
+- **Capacidade É somada** — o master distribui os volumes novos entre
+  `swfs-vol1` (rack1) e `swfs-vol2` (rack2) conforme abre espaço, então os
+  ~19,6GB dos dois discos de dados funcionam como um pool único.
+- **Redundância NÃO é automática** — cada arquivo grava num volume, em
+  **um único servidor**. Se `swfs-vol2` cair, todo arquivo que caiu nos
+  volumes dele é perdido; não existe cópia em `swfs-vol1`.
+- Pra ter replicação de verdade, duas formas: por upload
+  (`?replication=010` na URL do Filer — usado no Lab 5 do roteiro de
+  testes) ou por padrão do cluster inteiro, via `-defaultReplication` no
+  `weed master`.
+
+**Ação tomada:** `04-gerar-cloud-init.sh` agora pergunta interativamente
+o modelo de replicação padrão antes de cada deploy (`000` ou `010`,
+Enter mantém `000`) e aplica a escolha via `-defaultReplication` no
+`weed-master.service` de fábrica — ver README.md.
+
+### 5.1 Os modelos que o SeaweedFS permite (o código de 3 dígitos)
+
+Cada posição do código `XYZ` é um nível de infraestrutura, na ordem
+**datacenter → rack → node (servidor)**. Cada dígito diz quantas cópias
+extras existem *naquele* nível. Não confiei de memória nisso — forcei
+cada dígito isoladamente (`001`, `010`, `100`) e o próprio erro do master
+devolveu o nome interno do campo, o que confirma a ordem sem dúvida:
+
+| Código enviado | Campo que o master reportou | Nível |
+|---|---|---|
+| `001` | `{"node":1}` | outro **servidor**, mesmo rack |
+| `010` | `{"rack":1}` | outro **rack**, mesmo datacenter |
+| `100` | `{"dc":1}` | outro **datacenter** |
+
+Ou seja: **X = datacenter, Y = rack, Z = node** — não é a ordem que a
+gente imaginaria de cabeça ("primeiro dígito = o mais próximo"), é o
+oposto: o primeiro dígito é o nível **mais amplo** (datacenter), o
+último é o **mais estreito** (outro servidor dentro do mesmo rack).
+
+Cada dígito aceita `0`, `1` ou `2` (0, 1 ou 2 cópias extras naquele
+nível) — o total de cópias do arquivo é sempre `1 (original) + X + Y + Z`.
+Alguns códigos comuns, do mais simples ao mais redundante:
+
+| Código | Cópias totais | Onde ficam | Cabe neste lab? |
+|---|---|---|---|
+| `000` | 1 | nenhuma cópia extra | sim (padrão atual) |
+| `001` | 2 | outro servidor, mesmo rack | **não** — só 1 servidor por rack aqui |
+| `010` | 2 | outro rack, mesmo datacenter | **sim** — é o `vol1`↔`vol2` deste lab |
+| `100` | 2 | outro datacenter | **não** — só existe `dc1` aqui |
+| `110` | 3 | outro datacenter + outro rack | não |
+| `200` | 3 | 2 datacenters extras | não |
+
+Nesta topologia (1 datacenter, 2 racks, 1 volume server por rack), só
+`000` e `010` são fisicamente possíveis — os demais códigos exigem mais
+racks, mais datacenters ou mais de um volume server por rack do que o lab
+tem hardware pra oferecer. Um ambiente de produção de verdade, vendido
+como storage redundante, provavelmente ia querer pelo menos `2` ou `3`
+servidores por rack pra também poder usar códigos como `001`/`002`.
+
+## 6. Ambiente devolvido ao estado inicial
+
+Ao final desta rodada de testes, todo bucket/objeto foi apagado e os
+volumes "avulsos" (sem collection, de testes bem no início) foram
+removidos direto no disco dos volume servers (`weed-volume` parado,
+`.dat`/`.idx`/`.vif` apagados, serviço religado — o processo solta os
+arquivos e, ao subir de novo, reporta ao master que não tem mais volume
+nenhum). Confirmado via `/dir/status`: `Max: 16, Free: 16, Volumes: 0` nos
+dois racks — igual ao estado logo após o primeiro deploy do lab.
+
 ## Referências
 - [README.md](README.md) — arquitetura do lab
 - [00-config.env](00-config.env) — parâmetros do ambiente
