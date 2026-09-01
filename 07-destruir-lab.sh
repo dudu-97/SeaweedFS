@@ -85,9 +85,7 @@ fi
 
 if [[ "$PURGE" == "true" ]]; then
     BASE_IMAGE_PATH="$IMAGES_DIR/$BASE_IMAGE_NAME"
-    ROUTER_IMAGE_PATH="$IMAGES_DIR/$ROUTER_IMAGE_NAME"
     [[ -f "$BASE_IMAGE_PATH" ]] && { log "Removendo imagem Ubuntu"; rm -f "$BASE_IMAGE_PATH"; }
-    [[ -f "$ROUTER_IMAGE_PATH" ]] && { log "Removendo imagem FreeBSD"; rm -f "$ROUTER_IMAGE_PATH"; }
     [[ -f "$CLUSTER_KEY_PATH" ]] && { log "Removendo chave do cluster"; rm -f "$CLUSTER_KEY_PATH" "${CLUSTER_KEY_PATH}.pub"; }
 fi
 
