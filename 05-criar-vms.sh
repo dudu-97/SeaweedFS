@@ -43,7 +43,7 @@ else
         --name "$ROUTER_NAME" \
         --memory "$ROUTER_RAM_MB" \
         --vcpus "$ROUTER_VCPUS" \
-        --os-variant "$OS_VARIANT" \
+        --osinfo detect=on,require=off \
         --disk path="$ROUTER_DISK",format=qcow2,bus=virtio \
         --disk path="$ROUTER_SEED_ISO",device=cdrom \
         --network network="$ROUTER_WAN_NETWORK",mac="$ROUTER_WAN_MAC",model=virtio \
@@ -77,7 +77,7 @@ for vm in "${VM_NAMES[@]}"; do
         --name "$vm" \
         --memory "$VM_RAM_MB" \
         --vcpus "$VM_VCPUS" \
-        --os-variant "$OS_VARIANT" \
+        --osinfo detect=on,require=off \
         --disk path="$OS_DISK",format=qcow2,bus=virtio \
         --disk path="$DATA_DISK",format=qcow2,bus=virtio \
         --disk path="$SEED_ISO",device=cdrom \
