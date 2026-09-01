@@ -56,10 +56,19 @@ if grep -q "mac='${ROUTER_WAN_MAC}'" <<< "$WAN_NET_XML"; then
     warn "Reserva de IP WAN do roteador (MAC ${ROUTER_WAN_MAC}) já existe, pulando."
 else
     log "Reservando ${ROUTER_WAN_IP} para $ROUTER_NAME (MAC ${ROUTER_WAN_MAC}) na rede '$ROUTER_WAN_NETWORK'"
-    if [[ "$(virsh net-info "$ROUTER_WAN_NETWORK" | awk '/^Active/{print $2}')" == "yes" ]]; then
-        virsh net-update "$ROUTER_WAN_NETWORK" add-last ip-dhcp-host "$WAN_HOST_XML" --live --config
+    WAN_UPDATE_ARGS=(--config)
+    [[ "$(virsh net-info "$ROUTER_WAN_NETWORK" | awk '/^Active/{print $2}')" == "yes" ]] && WAN_UPDATE_ARGS=(--live --config)
+    # A checagem acima (grep no dumpxml) cobre o caso comum, mas não é à
+    # prova de falhas (ex: a reserva foi adicionada por uma execução
+    # anterior como root/sudo, cujo estado nem sempre bate 1:1 com o que
+    # este usuário enxerga). Se o libvirt recusar por já existir, trata
+    # como sucesso em vez de abortar o deploy inteiro por causa disso.
+    if WAN_UPDATE_OUT="$(virsh net-update "$ROUTER_WAN_NETWORK" add-last ip-dhcp-host "$WAN_HOST_XML" "${WAN_UPDATE_ARGS[@]}" 2>&1)"; then
+        :
+    elif grep -qi "already exists" <<< "$WAN_UPDATE_OUT"; then
+        warn "Reserva de IP WAN (MAC ${ROUTER_WAN_MAC}) já existia em '$ROUTER_WAN_NETWORK' (libvirt recusou duplicar) — seguindo em frente."
     else
-        virsh net-update "$ROUTER_WAN_NETWORK" add-last ip-dhcp-host "$WAN_HOST_XML" --config
+        die "Falha ao reservar IP WAN em '$ROUTER_WAN_NETWORK': $WAN_UPDATE_OUT"
     fi
 fi
 
