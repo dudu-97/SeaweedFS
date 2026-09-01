@@ -45,15 +45,36 @@ cd SeaweedFS
 ```bash
 sudo apt update
 sudo apt install -y virtinst libvirt-clients libvirt-daemon-system \
-                     qemu-utils cloud-image-utils wget xz-utils
+                     qemu-utils cloud-image-utils wget xz-utils virt-manager
 ```
 
-Seu usuário precisa conseguir falar com o libvirt sem `sudo` toda hora —
-confirme que está nos grupos certos (se não estiver, adicione e faça
-logout/login para valer):
+`virt-manager` é a ferramenta gráfica (Virtual Machine Manager) — não é
+usada pelos scripts do lab, que são 100% via `virsh`/linha de comando,
+mas vale instalar para abrir o **console gráfico** de qualquer VM (como
+se fosse um monitor conectado nela), o que é útil pra debugar algo que
+trava antes do SSH subir, ou só para bisbilhotar o boot. Depois de
+instalado, é só abrir "Virtual Machine Manager" no menu de aplicativos,
+ou `virt-manager` no terminal — as 6 VMs do lab aparecem lá assim que
+`./deploy-lab.sh` as cria.
+
+**Precisa reiniciar o computador depois de instalar esses pacotes? Não.**
+A instalação sobe o serviço `libvirtd` sozinha e carrega os módulos de
+kernel do KVM (`kvm_intel`/`kvm_amd`) automaticamente — nenhum reboot é
+necessário só por causa do `apt install`. As duas únicas coisas que
+*podem* pedir alguma ação depois de instalar:
+- **Grupos `libvirt`/`kvm`**: se você rodou o `usermod -aG` abaixo, o
+  Linux só aplica o novo grupo em sessões novas — basta **fazer
+  logout/login** (não precisa reiniciar a máquina inteira; um reboot
+  também resolve, mas é mais do que o necessário).
+- **Virtualização desabilitada na BIOS/UEFI**: se o `kvm-ok` do passo 1
+  falhou, aí sim é preciso reiniciar — mas para entrar na BIOS e habilitar
+  VT-x/AMD-V, não por causa dos pacotes em si.
+
+Seu usuário precisa conseguir falar com o libvirt sem `sudo` toda vez —
+confirme que está nos grupos certos:
 ```bash
 groups | grep -E "libvirt|kvm"
-sudo usermod -aG libvirt,kvm "$USER"   # só se o comando acima não mostrou os dois grupos
+sudo usermod -aG libvirt,kvm "$USER"   # só se o comando acima não mostrou os dois grupos, depois faça logout/login
 ```
 
 ## 3. Subir o lab
