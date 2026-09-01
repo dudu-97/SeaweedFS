@@ -61,13 +61,24 @@ if [[ "$CLEAN_NET" == "true" ]]; then
         warn "Rede '$NET_NAME' não existe, nada a remover."
     fi
 
-    log "Removendo reserva de IP WAN do roteador na rede '$ROUTER_WAN_NETWORK'..."
-    WAN_NET_ACTIVE=$(virsh net-info "$ROUTER_WAN_NETWORK" 2>/dev/null | awk '/^Active/{print $2}')
     WAN_HOST_XML="<host mac='${ROUTER_WAN_MAC}' name='${ROUTER_NAME}-wan' ip='${ROUTER_WAN_IP}'/>"
-    if [[ "$WAN_NET_ACTIVE" == "yes" ]]; then
-        virsh net-update "$ROUTER_WAN_NETWORK" delete ip-dhcp-host "$WAN_HOST_XML" --live --config >/dev/null 2>&1 || true
+    if virsh net-dumpxml "$ROUTER_WAN_NETWORK" 2>/dev/null | grep -q "mac='${ROUTER_WAN_MAC}'"; then
+        log "Removendo reserva de IP WAN do roteador na rede '$ROUTER_WAN_NETWORK'..."
+        WAN_DEL_ARGS=(--config)
+        [[ "$(virsh net-info "$ROUTER_WAN_NETWORK" 2>/dev/null | awk '/^Active/{print $2}')" == "yes" ]] && WAN_DEL_ARGS=(--live --config)
+        # Antes isso ignorava qualquer erro silenciosamente (|| true +
+        # /dev/null) — se a remoção falhasse por qualquer motivo, o
+        # script terminava normal e ninguém ficava sabendo que a reserva
+        # sobrou órfã, só descobrindo no próximo deploy (erro de "já
+        # existe" no 03-configurar-rede.sh). Agora o erro real aparece.
+        if WAN_DEL_OUT="$(virsh net-update "$ROUTER_WAN_NETWORK" delete ip-dhcp-host "$WAN_HOST_XML" "${WAN_DEL_ARGS[@]}" 2>&1)"; then
+            log "Reserva de IP WAN removida."
+        else
+            warn "Não consegui remover a reserva de IP WAN (MAC ${ROUTER_WAN_MAC}) em '$ROUTER_WAN_NETWORK': $WAN_DEL_OUT"
+            warn "Remova manualmente antes do próximo deploy: virsh net-update $ROUTER_WAN_NETWORK delete ip-dhcp-host \"$WAN_HOST_XML\" --live --config"
+        fi
     else
-        virsh net-update "$ROUTER_WAN_NETWORK" delete ip-dhcp-host "$WAN_HOST_XML" --config >/dev/null 2>&1 || true
+        warn "Reserva de IP WAN (MAC ${ROUTER_WAN_MAC}) não existe em '$ROUTER_WAN_NETWORK', nada a remover."
     fi
     warn "Rede WAN '$ROUTER_WAN_NETWORK' (ex: default) em si NUNCA é destruída — é do sistema, só a reserva foi removida."
 fi
