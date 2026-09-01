@@ -55,30 +55,30 @@ done
 if [[ "$CLEAN_NET" == "true" ]]; then
     if virsh net-info "$NET_NAME" >/dev/null 2>&1; then
         log "Removendo rede isolada '$NET_NAME'..."
-        virsh net-destroy "$NET_NAME" >/dev/null 2>&1 || true
-        virsh net-undefine "$NET_NAME" >/dev/null 2>&1 || true
+        virsh net-destroy "$NET_NAME" >/dev/null 2>&1 || true   # ok falhar: pode já estar inativa
+        if ! NET_UNDEF_OUT="$(virsh net-undefine "$NET_NAME" 2>&1)"; then
+            warn "Não consegui remover a definição da rede '$NET_NAME': $NET_UNDEF_OUT"
+            warn "Remova manualmente antes do próximo deploy: virsh net-undefine $NET_NAME"
+        fi
     else
         warn "Rede '$NET_NAME' não existe, nada a remover."
     fi
 
+    # Não faz um pré-check de "já existe" antes de tentar remover: esse
+    # tipo de checagem via grep no dumpxml já se mostrou pouco confiável
+    # em pelo menos um ambiente (às vezes lê o estado errado). Em vez
+    # disso, sempre tenta remover e trata qualquer resultado (removeu,
+    # ou já não existia, ou falhou por outro motivo) como não-fatal —
+    # é uma limpeza best-effort, não deveria travar o destroy.
+    log "Removendo reserva de IP WAN do roteador na rede '$ROUTER_WAN_NETWORK' (se existir)..."
     WAN_HOST_XML="<host mac='${ROUTER_WAN_MAC}' name='${ROUTER_NAME}-wan' ip='${ROUTER_WAN_IP}'/>"
-    if virsh net-dumpxml "$ROUTER_WAN_NETWORK" 2>/dev/null | grep -q "mac='${ROUTER_WAN_MAC}'"; then
-        log "Removendo reserva de IP WAN do roteador na rede '$ROUTER_WAN_NETWORK'..."
-        WAN_DEL_ARGS=(--config)
-        [[ "$(virsh net-info "$ROUTER_WAN_NETWORK" 2>/dev/null | awk '/^Active/{print $2}')" == "yes" ]] && WAN_DEL_ARGS=(--live --config)
-        # Antes isso ignorava qualquer erro silenciosamente (|| true +
-        # /dev/null) — se a remoção falhasse por qualquer motivo, o
-        # script terminava normal e ninguém ficava sabendo que a reserva
-        # sobrou órfã, só descobrindo no próximo deploy (erro de "já
-        # existe" no 03-configurar-rede.sh). Agora o erro real aparece.
-        if WAN_DEL_OUT="$(virsh net-update "$ROUTER_WAN_NETWORK" delete ip-dhcp-host "$WAN_HOST_XML" "${WAN_DEL_ARGS[@]}" 2>&1)"; then
-            log "Reserva de IP WAN removida."
-        else
-            warn "Não consegui remover a reserva de IP WAN (MAC ${ROUTER_WAN_MAC}) em '$ROUTER_WAN_NETWORK': $WAN_DEL_OUT"
-            warn "Remova manualmente antes do próximo deploy: virsh net-update $ROUTER_WAN_NETWORK delete ip-dhcp-host \"$WAN_HOST_XML\" --live --config"
-        fi
+    WAN_DEL_ARGS=(--config)
+    [[ "$(virsh net-info "$ROUTER_WAN_NETWORK" 2>/dev/null | awk '/^Active/{print $2}')" == "yes" ]] && WAN_DEL_ARGS=(--live --config)
+    if WAN_DEL_OUT="$(virsh net-update "$ROUTER_WAN_NETWORK" delete ip-dhcp-host "$WAN_HOST_XML" "${WAN_DEL_ARGS[@]}" 2>&1)"; then
+        log "Reserva de IP WAN removida (ou já não existia)."
     else
-        warn "Reserva de IP WAN (MAC ${ROUTER_WAN_MAC}) não existe em '$ROUTER_WAN_NETWORK', nada a remover."
+        warn "Não removi a reserva de IP WAN (MAC ${ROUTER_WAN_MAC}) em '$ROUTER_WAN_NETWORK' — pode já não existir, ou pode ser um erro real. Detalhe do libvirt: $WAN_DEL_OUT"
+        warn "Se o próximo deploy reclamar de reserva duplicada, remova manualmente: virsh net-update $ROUTER_WAN_NETWORK delete ip-dhcp-host \"$WAN_HOST_XML\" --live --config"
     fi
     warn "Rede WAN '$ROUTER_WAN_NETWORK' (ex: default) em si NUNCA é destruída — é do sistema, só a reserva foi removida."
 fi
