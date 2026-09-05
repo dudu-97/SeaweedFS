@@ -24,20 +24,25 @@ for vm in "${VM_NAMES[@]}"; do
     mkdir -p "$VM_DIR"
 
     OS_DISK="$VM_DIR/${vm}-os.qcow2"
-    DATA_DISK="$VM_DIR/${vm}-data.qcow2"
+    OS_SIZE="${VM_OS_DISK_SIZE[$vm]}"
 
     if [[ -f "$OS_DISK" ]]; then
         warn "$vm: disco de SO já existe ($OS_DISK), pulando."
     else
-        log "$vm: criando disco de SO (${OS_DISK_SIZE}, backing file na imagem base)"
-        qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE_PATH" "$OS_DISK" "$OS_DISK_SIZE"
+        log "$vm: criando disco de SO (${OS_SIZE}, backing file na imagem base)"
+        qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE_PATH" "$OS_DISK" "$OS_SIZE"
     fi
 
-    if [[ -f "$DATA_DISK" ]]; then
-        warn "$vm: disco de dados já existe ($DATA_DISK), pulando."
-    else
-        log "$vm: criando disco de dados (${DATA_DISK_SIZE}, cru, para o SeaweedFS)"
-        qemu-img create -f qcow2 "$DATA_DISK" "$DATA_DISK_SIZE"
+    # Nem toda VM tem 2º disco (só os volume nodes, via VM_DATA_DISK_SIZE)
+    DATA_SIZE="${VM_DATA_DISK_SIZE[$vm]:-}"
+    if [[ -n "$DATA_SIZE" ]]; then
+        DATA_DISK="$VM_DIR/${vm}-data.qcow2"
+        if [[ -f "$DATA_DISK" ]]; then
+            warn "$vm: disco de dados já existe ($DATA_DISK), pulando."
+        else
+            log "$vm: criando disco de dados (${DATA_SIZE}, cru, para o SeaweedFS)"
+            qemu-img create -f qcow2 "$DATA_DISK" "$DATA_SIZE"
+        fi
     fi
 done
 

@@ -65,21 +65,27 @@ for vm in "${VM_NAMES[@]}"; do
 
     VM_DIR="$LAB_DIR/$vm"
     OS_DISK="$VM_DIR/${vm}-os.qcow2"
-    DATA_DISK="$VM_DIR/${vm}-data.qcow2"
     SEED_ISO="$VM_DIR/${vm}-seed.iso"
 
-    for f in "$OS_DISK" "$DATA_DISK" "$SEED_ISO"; do
+    for f in "$OS_DISK" "$SEED_ISO"; do
         [[ -f "$f" ]] || die "$f não encontrado. Rode antes: ./02-criar-discos.sh e ./04-gerar-cloud-init.sh"
     done
+
+    # Nem toda VM tem 2º disco (só os volume nodes, ver VM_DATA_DISK_SIZE)
+    DISK_ARGS=(--disk path="$OS_DISK",format=qcow2,bus=virtio)
+    if [[ -n "${VM_DATA_DISK_SIZE[$vm]:-}" ]]; then
+        DATA_DISK="$VM_DIR/${vm}-data.qcow2"
+        [[ -f "$DATA_DISK" ]] || die "$DATA_DISK não encontrado. Rode antes: ./02-criar-discos.sh"
+        DISK_ARGS+=(--disk path="$DATA_DISK",format=qcow2,bus=virtio)
+    fi
 
     log "Criando VM: $vm [${VM_ROLE[$vm]}] (IP ${VM_IP[$vm]}, MAC ${VM_MAC[$vm]})"
     virt-install \
         --name "$vm" \
-        --memory "$VM_RAM_MB" \
-        --vcpus "$VM_VCPUS" \
+        --memory "${VM_RAM_MB[$vm]}" \
+        --vcpus "${VM_VCPUS[$vm]}" \
         --osinfo detect=on,require=off \
-        --disk path="$OS_DISK",format=qcow2,bus=virtio \
-        --disk path="$DATA_DISK",format=qcow2,bus=virtio \
+        "${DISK_ARGS[@]}" \
         --disk path="$SEED_ISO",device=cdrom \
         --network network="$NET_NAME",mac="${VM_MAC[$vm]}",model=virtio \
         --graphics none \

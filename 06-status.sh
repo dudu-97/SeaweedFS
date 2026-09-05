@@ -38,23 +38,47 @@ for vm in "${VM_NAMES[@]}"; do
     ip="${VM_IP[$vm]}"
 
     # monta a lista de porta:caminho:papel que esta VM deveria expor
+    IS_MASTER=false
+    for m in "${MASTER_HOSTS[@]}"; do [[ "$vm" == "$m" ]] && IS_MASTER=true; done
+    IS_VOLUME=false
+    for n in "${VOLUME_NODES[@]}"; do [[ "$vm" == "$n" ]] && IS_VOLUME=true; done
+    IS_S3FRONT=false
+    for s in "${S3FRONT_HOSTS[@]}"; do [[ "$vm" == "$s" ]] && IS_S3FRONT=true; done
+
     CHECKS=()
-    [[ "$vm" == *master* ]] && CHECKS+=("${SEAWEED_MASTER_PORT}:/cluster/status:master")
-    [[ "$vm" == *vol* ]]    && CHECKS+=("${SEAWEED_VOLUME_PORT}:/status:volume")
-    if [[ "$vm" == "$FILER_HOST" ]]; then
+    if $IS_MASTER; then
+        CHECKS+=("${SEAWEED_MASTER_PORT}:/cluster/status:master")
         CHECKS+=("${SEAWEED_FILER_PORT}:/:filer")
-        CHECKS+=("${SEAWEED_S3_PORT}:/:s3")
     fi
+    if $IS_VOLUME; then
+        for ((i = 0; i < VOLUME_PROCS_PER_NODE; i++)); do
+            CHECKS+=("$((SEAWEED_VOLUME_BASE_PORT + i)):/status:volume${i}")
+        done
+    fi
+    $IS_S3FRONT && CHECKS+=("${SEAWEED_S3_PORT}:/:s3")
     [[ "$vm" == "$ADMIN_HOST" ]] && CHECKS+=("${SEAWEED_ADMIN_PORT}:/:admin")
     [[ "$vm" == "$UPLOAD_DEMO_HOST" ]] && CHECKS+=("${SEAWEED_UPLOAD_DEMO_PORT}:/:upload-demo")
 
+    # papéis sem HTTP (postgres, worker) -- checados via systemd, não curl
+    SVC_CHECKS=()
+    [[ "$vm" == "$PGSQL_HOST" ]] && SVC_CHECKS+=("postgresql:pgsql")
+    [[ "$vm" == "$WORKER_HOST" ]] && SVC_CHECKS+=("weed-worker:worker")
+
     REMOTE_CMD='command -v weed >/dev/null 2>&1 && echo "BIN:ok" || echo "BIN:falta"; '
-    REMOTE_CMD+='mountpoint -q '"${DATA_MOUNT_DIR}"' && echo "DISK:ok" || echo "DISK:falta"; '
+    if $IS_VOLUME; then
+        REMOTE_CMD+='mountpoint -q '"${DATA_MOUNT_DIR}"' && echo "DISK:ok" || echo "DISK:falta"; '
+    else
+        REMOTE_CMD+='echo "DISK:n/a"; '
+    fi
     for c in "${CHECKS[@]}"; do
         port="${c%%:*}"
         rest="${c#*:}"
         path="${rest%%:*}"
         REMOTE_CMD+="code=\$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:${port}${path} 2>/dev/null); echo \"HTTP:${port}:\${code:-000}\"; "
+    done
+    for c in "${SVC_CHECKS[@]}"; do
+        unit="${c%%:*}"
+        REMOTE_CMD+="systemctl is-active --quiet ${unit} && echo \"SVC:${unit}:active\" || echo \"SVC:${unit}:inactive\"; "
     done
 
     if ! REMOTE_OUT=$(ssh -n "${SSH_OPTS[@]}" "${VM_USER}@${ip}" "$REMOTE_CMD" 2>/dev/null); then
@@ -83,6 +107,17 @@ for vm in "${VM_NAMES[@]}"; do
             FIRST=0
         else
             printf "%-14s %-9s %-9s %-9s %-7s %-6s %-8s\n" "" "" "" "$role" "$port" "$code" "$ST"
+        fi
+    done
+    for c in "${SVC_CHECKS[@]}"; do
+        unit="${c%%:*}"; role="${c##*:}"
+        active=$(grep -oP "(?<=SVC:${unit}:)\w+" <<<"$REMOTE_OUT")
+        [[ "$active" == "active" ]] && ST="UP" || { ST="DOWN"; ANY_DOWN=1; }
+        if [[ "$FIRST" == "1" ]]; then
+            printf "%-14s %-9s %-9s %-9s %-7s %-6s %-8s\n" "$vm" "$BIN" "$DISK" "$role" "-" "$active" "$ST"
+            FIRST=0
+        else
+            printf "%-14s %-9s %-9s %-9s %-7s %-6s %-8s\n" "" "" "" "$role" "-" "$active" "$ST"
         fi
     done
 done

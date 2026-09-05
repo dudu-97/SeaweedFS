@@ -63,13 +63,17 @@ else
 fi
 log "Gerador de seed ISO: $SEED_TOOL"
 
-# --- URL de download do binário do SeaweedFS (pré-instalado via cloud-init) ---
+# --- URL de download do binário do SeaweedFS Enterprise (pré-instalado
+# via cloud-init) --- mesmo binário `weed` da edição open-source, só que
+# de outro repositório de releases. Sem licença configurada, roda com o
+# trial padrão automático (abaixo de 25TB é livre de licença; a única
+# limitação é a janela de retenção do Data Recovery, 1h no trial).
 if [[ "$SEAWEED_VERSION" == "latest" ]]; then
-    SEAWEED_DOWNLOAD_URL="https://github.com/seaweedfs/seaweedfs/releases/latest/download/linux_amd64_large_disk.tar.gz"
+    SEAWEED_DOWNLOAD_URL="https://github.com/${SEAWEED_ENTERPRISE_REPO}/releases/latest/download/${SEAWEED_ENTERPRISE_ASSET}"
 else
-    SEAWEED_DOWNLOAD_URL="https://github.com/seaweedfs/seaweedfs/releases/download/${SEAWEED_VERSION}/linux_amd64_large_disk.tar.gz"
+    SEAWEED_DOWNLOAD_URL="https://github.com/${SEAWEED_ENTERPRISE_REPO}/releases/download/${SEAWEED_VERSION}/${SEAWEED_ENTERPRISE_ASSET}"
 fi
-log "SeaweedFS será pré-instalado via cloud-init: $SEAWEED_DOWNLOAD_URL"
+log "SeaweedFS Enterprise será pré-instalado via cloud-init: $SEAWEED_DOWNLOAD_URL"
 
 # --- chave SSH do HOST (para você acessar as VMs) ---------------------
 if [[ ! -f "$SSH_PUBKEY_PATH" ]]; then
@@ -104,11 +108,24 @@ done
 
 # --- lista de masters (ip:porta), usada por master/volume/filer -------
 MASTER_PEERS=""
-for vm in "${VM_NAMES[@]}"; do
-    [[ "$vm" == *master* ]] && MASTER_PEERS+="${VM_IP[$vm]}:${SEAWEED_MASTER_PORT},"
+for vm in "${MASTER_HOSTS[@]}"; do
+    MASTER_PEERS+="${VM_IP[$vm]}:${SEAWEED_MASTER_PORT},"
 done
 MASTER_PEERS="${MASTER_PEERS%,}"
 log "Masters do cluster: $MASTER_PEERS"
+
+# --- lista de filers (ip:porta) -- cada master roda um filer junto, o
+# s3front standalone usa essa lista pra falar com qualquer um deles ----
+FILER_PEERS=""
+for vm in "${MASTER_HOSTS[@]}"; do
+    FILER_PEERS+="${VM_IP[$vm]}:${SEAWEED_FILER_PORT},"
+done
+FILER_PEERS="${FILER_PEERS%,}"
+log "Filers do cluster: $FILER_PEERS"
+
+# Diretório de estado no disco de SO, para papéis sem 2º disco (master,
+# admin, s3front) -- só os volume nodes têm disco de dados dedicado.
+STATE_DIR="/var/lib/seaweedfs"
 
 # --- página estática de demo de upload S3 (servida em $UPLOAD_DEMO_HOST) --
 # Heredoc com aspas ('ENDHTML') de propósito: o JS abaixo usa template
@@ -176,7 +193,7 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
   <legend>3. Objetos no bucket</legend>
   <button onclick="listObjects()">Listar</button>
   <table id="objTable">
-    <thead><tr><th>Chave</th><th>Tamanho</th><th>Modificado</th></tr></thead>
+    <thead><tr><th>Chave</th><th>Tamanho</th><th>Modificado</th><th></th></tr></thead>
     <tbody></tbody>
   </table>
 </fieldset>
@@ -187,6 +204,18 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
   <button onclick="listVersions()">Listar versões (inclui excluídas)</button>
   <table id="verTable">
     <thead><tr><th>Chave</th><th>Version ID</th><th>Tipo</th><th>Atual?</th><th>Modificado</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+</fieldset>
+
+<fieldset>
+  <legend>5. Métricas do bucket (SeaweedFS_s3_bucket_*)</legend>
+  <label>Endpoint de métricas (Prometheus — porta separada da API S3)
+    <input type="text" id="metricsEndpoint" value="">
+  </label>
+  <button onclick="checkBucketMetrics()">Consultar métricas</button>
+  <table id="metricsTable">
+    <thead><tr><th>Métrica</th><th>Valor</th></tr></thead>
     <tbody></tbody>
   </table>
 </fieldset>
@@ -204,6 +233,7 @@ let s3 = null;
 // gateway S3 -- funciona tanto acessando via túnel (localhost) quanto de
 // dentro da rede do lab (IP da VM), sem precisar editar a página.
 document.getElementById('endpoint').value = window.location.protocol + '//' + window.location.hostname + ':8333';
+document.getElementById('metricsEndpoint').value = window.location.protocol + '//' + window.location.hostname + ':9327/metrics';
 
 function log(msg) {
   const el = document.getElementById('log');
@@ -259,7 +289,13 @@ function listObjects() {
     tbody.innerHTML = '';
     (data.Contents || []).forEach(obj => {
       const tr = document.createElement('tr');
+      const btn = document.createElement('button');
+      btn.textContent = 'Baixar';
+      btn.onclick = () => downloadObject(obj.Key);
       tr.innerHTML = `<td>${obj.Key}</td><td>${obj.Size} B</td><td>${new Date(obj.LastModified).toLocaleString()}</td>`;
+      const td = document.createElement('td');
+      td.appendChild(btn);
+      tr.appendChild(td);
       tbody.appendChild(tr);
     });
     log(`OK — ${(data.Contents || []).length} objeto(s) no bucket.`);
@@ -293,16 +329,69 @@ function listVersions() {
     tbody.innerHTML = '';
     rows.forEach(v => {
       const tr = document.createElement('tr');
-      const btn = document.createElement('button');
-      btn.textContent = 'Apagar esta versão';
-      btn.onclick = () => deleteVersion(v.Key, v.VersionId);
       tr.innerHTML = `<td>${v.Key}</td><td style="font-family:monospace">${v.VersionId}</td><td>${v.type}</td><td>${v.IsLatest ? 'sim' : 'não'}</td><td>${new Date(v.LastModified).toLocaleString()}</td>`;
       const td = document.createElement('td');
-      td.appendChild(btn);
+      // delete marker não tem conteúdo -- não dá pra baixar nem restaurar, só apagar
+      if (v.type === 'Versão') {
+        const dlBtn = document.createElement('button');
+        dlBtn.textContent = 'Baixar';
+        dlBtn.onclick = () => downloadObject(v.Key, v.VersionId);
+        td.appendChild(dlBtn);
+
+        if (!v.IsLatest) {
+          const restoreBtn = document.createElement('button');
+          restoreBtn.textContent = 'Restaurar como atual';
+          restoreBtn.onclick = () => restoreVersion(v.Key, v.VersionId);
+          td.appendChild(restoreBtn);
+        }
+      }
+      const delBtn = document.createElement('button');
+      delBtn.textContent = 'Apagar esta versão';
+      delBtn.onclick = () => deleteVersion(v.Key, v.VersionId);
+      td.appendChild(delBtn);
       tr.appendChild(td);
       tbody.appendChild(tr);
     });
     log(`OK — ${rows.length} entrada(s) (versões + delete markers). "Apagar esta versão" remove só aquele VersionId específico — bem diferente de apagar a chave normal, que (com versionamento ligado) só cria um delete marker novo em vez de sumir com o histórico.`);
+  });
+}
+
+function downloadObject(key, versionId) {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+  const params = { Bucket: bucket, Key: key };
+  if (versionId) params.VersionId = versionId;
+
+  log(`GET ${bucket}/${key}${versionId ? '?versionId=' + versionId : ''}...`);
+  s3.getObject(params, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    const blob = new Blob([data.Body], { type: data.ContentType || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = key.split('/').pop();
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    log(`OK — baixado (${blob.size} bytes)${versionId ? ', versão ' + versionId : ', versão atual'}.`);
+  });
+}
+
+function restoreVersion(key, versionId) {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+
+  log(`GET ${bucket}/${key}?versionId=${versionId} (lendo o conteúdo da versão antiga)...`);
+  s3.getObject({ Bucket: bucket, Key: key, VersionId: versionId }, (err, data) => {
+    if (err) { log(`FALHOU ao ler a versão: ${err.message}`); return; }
+    log(`PUT ${bucket}/${key} (gravando esse conteúdo como versão nova/atual)...`);
+    s3.putObject({ Bucket: bucket, Key: key, Body: data.Body, ContentType: data.ContentType }, (err2, data2) => {
+      if (err2) { log(`FALHOU ao restaurar: ${err2.message}`); return; }
+      log(`OK — versão ${versionId} virou a atual (novo ETag=${data2.ETag}). O S3 não "reverte" de verdade — isso cria uma versão NOVA com o conteúdo antigo; o histórico continua íntegro, nada foi apagado.`);
+      listVersions();
+      listObjects();
+    });
   });
 }
 
@@ -315,6 +404,36 @@ function deleteVersion(key, versionId) {
     if (err) { log(`FALHOU: ${err.message}`); return; }
     log(`OK — versão ${versionId} de "${key}" apagada de vez (esse delete específico não é reversível nem cria delete marker).`);
     listVersions();
+  });
+}
+
+function checkBucketMetrics() {
+  const bucket = document.getElementById('bucket').value.trim();
+  const url = document.getElementById('metricsEndpoint').value.trim();
+
+  log(`GET ${url} (Prometheus /metrics, filtrando bucket="${bucket}")...`);
+  fetch(url).then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  }).then(text => {
+    const wanted = ['SeaweedFS_s3_bucket_size_bytes', 'SeaweedFS_s3_bucket_physical_size_bytes', 'SeaweedFS_s3_bucket_quota_bytes', 'SeaweedFS_s3_bucket_read_only'];
+    const tbody = document.querySelector('#metricsTable tbody');
+    tbody.innerHTML = '';
+    let found = 0;
+    text.split('\n').forEach(line => {
+      if (!line || line.startsWith('#')) return;
+      const m = line.match(/^(\S+?)\{([^}]*)\}\s+([0-9.eE+-]+)/);
+      if (!m) return;
+      const [, name, labels, value] = m;
+      if (!wanted.includes(name) || !labels.includes(`bucket="${bucket}"`)) return;
+      found++;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${name}</td><td>${value}</td>`;
+      tbody.appendChild(tr);
+    });
+    log(found ? `OK — ${found} métrica(s) pro bucket "${bucket}".` : `Nenhuma métrica encontrada pro bucket "${bucket}" ainda (o coletor demora alguns segundos após a primeira atividade, ou confira o nome do bucket).`);
+  }).catch(err => {
+    log(`FALHOU: ${err.message}. Se for erro de rede sem detalhe (CORS), o navegador bloqueia fetch() entre portas diferentes sem cabeçalho Access-Control-Allow-Origin — teste via terminal: curl ${url} | grep bucket`);
   });
 }
 </script>
@@ -333,12 +452,43 @@ for vm in "${VM_NAMES[@]}"; do
     PRIVKEY_INDENTED=$(printf '%s\n' "$CLUSTER_PRIVKEY" | indent "      ")
     HOSTS_INDENTED=$(printf '%s' "$HOSTS_ENTRIES" | indent "      ")
 
+    # --- que papel(is) esta VM tem ------------------------------------
+    IS_MASTER=false
+    for m in "${MASTER_HOSTS[@]}"; do [[ "$vm" == "$m" ]] && IS_MASTER=true; done
+    IS_VOLUME=false
+    for n in "${VOLUME_NODES[@]}"; do [[ "$vm" == "$n" ]] && IS_VOLUME=true; done
+    IS_S3FRONT=false
+    for s in "${S3FRONT_HOSTS[@]}"; do [[ "$vm" == "$s" ]] && IS_S3FRONT=true; done
+    IS_PGSQL=false
+    [[ "$vm" == "$PGSQL_HOST" ]] && IS_PGSQL=true
+
+    # pacotes extras por papel (a lista base -- curl/tar/e2fsprogs/python3
+    # -- é igual pra todas as VMs, ver mais abaixo)
+    EXTRA_PACKAGES=""
+    $IS_PGSQL && EXTRA_PACKAGES="  - postgresql"
+
+    # 2º disco (/dev/vdb) só existe nos volume nodes -- as demais VMs não
+    # têm VM_DATA_DISK_SIZE preenchido em 00-config.env, então não têm
+    # esse disco anexado (ver 02-criar-discos.sh e 05-criar-vms.sh).
+    DATA_DISK_RUNCMD=""
+    if $IS_VOLUME; then
+        DATA_DISK_RUNCMD="
+  # --- disco de dados: formata (1x), monta em ${DATA_MOUNT_DIR} e dá o
+  # dono certo ao ${VM_USER} -- sem isso, \"weed volume\" falha com
+  # \"permission denied\" ao criar suas pastas de estado.
+  - [ bash, -c, \"blkid ${DATA_DISK_DEVICE} >/dev/null 2>&1 || mkfs.ext4 -F -L swfs-data ${DATA_DISK_DEVICE}\" ]
+  - mkdir -p ${DATA_MOUNT_DIR}
+  - [ bash, -c, \"grep -q '^LABEL=swfs-data' /etc/fstab || echo 'LABEL=swfs-data ${DATA_MOUNT_DIR} ext4 defaults 0 2' >> /etc/fstab\" ]
+  - mount -a
+  - chown ${VM_USER}:${VM_USER} ${DATA_MOUNT_DIR}"
+    fi
+
     # --- unidades systemd + runcmd do(s) papel(is) desta VM -----------
     # Escritas em /etc (não em $HOME), então não precisam de "defer".
     WEED_UNITS=""
     WEED_RUNCMD=""
 
-    if [[ "$vm" == *master* ]]; then
+    if $IS_MASTER; then
         WEED_UNITS+="
   - path: /etc/systemd/system/weed-master.service
     permissions: '0644'
@@ -349,7 +499,7 @@ for vm in "${VM_NAMES[@]}"; do
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed master -mdir=${DATA_MOUNT_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS} -defaultReplication=${MASTER_DEFAULT_REPLICATION}
+      ExecStart=/usr/local/bin/weed master -mdir=${STATE_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS} -defaultReplication=${MASTER_DEFAULT_REPLICATION}
       Restart=on-failure
       RestartSec=5
 
@@ -357,59 +507,100 @@ for vm in "${VM_NAMES[@]}"; do
       WantedBy=multi-user.target
 "
         WEED_RUNCMD+="
-  - mkdir -p ${DATA_MOUNT_DIR}/master
+  - mkdir -p ${STATE_DIR}/master
   - systemctl daemon-reload
-  - systemctl enable --now weed-master.service"
-    fi
+  - /usr/local/bin/svc-enable-now.sh weed-master.service"
 
-    if [[ "$vm" == *vol* ]]; then
-        WEED_UNITS+="
-  - path: /etc/systemd/system/weed-volume.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=SeaweedFS Volume Server
-      After=network-online.target
-      Wants=network-online.target
-
-      [Service]
-      ExecStart=/usr/local/bin/weed volume -dir=${DATA_MOUNT_DIR}/volume -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${SEAWEED_VOLUME_PORT}
-      Restart=on-failure
-      RestartSec=5
-
-      [Install]
-      WantedBy=multi-user.target
-"
-        WEED_RUNCMD+="
-  - mkdir -p ${DATA_MOUNT_DIR}/volume
-  - systemctl daemon-reload
-  - systemctl enable --now weed-volume.service"
-    fi
-
-    if [[ "$vm" == "$FILER_HOST" ]]; then
+        # Todo master roda um filer junto (era 1 VM dedicada antes; agora
+        # os 3 masters/filers dividem carga e o s3front fala com qualquer
+        # um deles). Metadado vai pro Postgres (pgsql01), não LevelDB
+        # local -- é o gargalo de concorrência citado pela empresa.
+        # O filer.toml é gerado ONE-SHOT via `weed scaffold` (contém o
+        # template padrão inteiro, com [postgres] desabilitado); a
+        # conexão de verdade entra via variável de ambiente no service
+        # (WEED_POSTGRES_*), que sobrescreve só os campos citados --
+        # convenção documentada em `weed scaffold -h`.
         WEED_UNITS+="
   - path: /etc/systemd/system/weed-filer.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=SeaweedFS Filer + API S3
-      After=network-online.target weed-volume.service
+      Description=SeaweedFS Filer (metadados no Postgres, sem S3 embutido)
+      After=network-online.target weed-master.service
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed filer -master=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -defaultStoreDir=${DATA_MOUNT_DIR}/filer -s3 -s3.config=${DATA_MOUNT_DIR}/filer/s3.json -s3.port=${SEAWEED_S3_PORT}
+      Environment=WEED_POSTGRES_ENABLED=true
+      Environment=WEED_POSTGRES_HOSTNAME=${VM_IP[$PGSQL_HOST]}
+      Environment=WEED_POSTGRES_PORT=${PGSQL_PORT}
+      Environment=WEED_POSTGRES_USERNAME=${PGSQL_USER}
+      Environment=WEED_POSTGRES_PASSWORD=${PGSQL_PASSWORD}
+      Environment=WEED_POSTGRES_DATABASE=${PGSQL_DB}
+      Environment=WEED_LEVELDB2_ENABLED=false
+      ExecStart=/usr/local/bin/weed filer -master=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - mkdir -p /etc/seaweedfs
+  - /usr/local/bin/weed scaffold -config=filer -output=/etc/seaweedfs/
+  - systemctl daemon-reload
+  - /usr/local/bin/svc-enable-now.sh weed-filer.service"
+    fi
+
+    if $IS_VOLUME; then
+        for ((i = 0; i < VOLUME_PROCS_PER_NODE; i++)); do
+            VPORT=$((SEAWEED_VOLUME_BASE_PORT + i))
+            WEED_UNITS+="
+  - path: /etc/systemd/system/weed-volume${i}.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS Volume Server ${i} (disco simulado ${i} de ${VOLUME_PROCS_PER_NODE})
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed volume -dir=${DATA_MOUNT_DIR}/volume${i} -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${VPORT}
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+            WEED_RUNCMD+="
+  - mkdir -p ${DATA_MOUNT_DIR}/volume${i}"
+        done
+        WEED_RUNCMD+="
+  - systemctl daemon-reload"
+        for ((i = 0; i < VOLUME_PROCS_PER_NODE; i++)); do
+            WEED_RUNCMD+="
+  - /usr/local/bin/svc-enable-now.sh weed-volume${i}.service"
+        done
+    fi
+
+    if $IS_S3FRONT; then
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-s3.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS S3 Gateway (standalone, fala com os filers dos masters)
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed s3 -filer=${FILER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -port=${SEAWEED_S3_PORT} -config=${STATE_DIR}/s3.json -metricsPort=${SEAWEED_S3_METRICS_PORT}
       Restart=on-failure
       RestartSec=5
 
       [Install]
       WantedBy=multi-user.target
 
-  # Identidade S3 (accessKey/secretKey de 00-config.env). Escrita em
-  # /root (existe desde o boot) em vez de \${DATA_MOUNT_DIR}/filer
-  # diretamente: write_files roda ANTES do runcmd que monta o disco de
-  # dados, então gravar direto no destino final ficaria escondido pelo
-  # mount que vem depois -- o runcmd abaixo copia para o lugar certo
-  # só depois do mount.
+  # Identidade S3 (accessKey/secretKey de 00-config.env).
   - path: /root/s3.json
     permissions: '0600'
     content: |
@@ -426,25 +617,37 @@ for vm in "${VM_NAMES[@]}"; do
       }
 "
         WEED_RUNCMD+="
-  - mkdir -p ${DATA_MOUNT_DIR}/filer
-  - cp /root/s3.json ${DATA_MOUNT_DIR}/filer/s3.json
-  - chmod 600 ${DATA_MOUNT_DIR}/filer/s3.json
+  - mkdir -p ${STATE_DIR}
+  - cp /root/s3.json ${STATE_DIR}/s3.json
+  - chmod 600 ${STATE_DIR}/s3.json
   - systemctl daemon-reload
-  - systemctl enable --now weed-filer.service"
+  - /usr/local/bin/svc-enable-now.sh weed-s3.service"
     fi
 
-    if [[ "$vm" == "$ADMIN_HOST" ]]; then
+    if $IS_PGSQL; then
+        # Postgres do apt já vem só ouvindo em localhost -- abre pra rede
+        # isolada do lab (só ela, não pro mundo) e cria o role/database
+        # que os filers usam. Idempotente: refaz sem erro se rodar de novo.
+        WEED_RUNCMD+="
+  - [ bash, -c, \"sed -i \\\"s/^#\\\\?listen_addresses.*/listen_addresses = '*'/\\\" /etc/postgresql/*/main/postgresql.conf\" ]
+  - [ bash, -c, \"grep -q '${NET_GATEWAY%.*}.0/${NET_PREFIX}' /etc/postgresql/*/main/pg_hba.conf || echo 'host    all             all             ${NET_GATEWAY%.*}.0/${NET_PREFIX}        scram-sha-256' >> /etc/postgresql/*/main/pg_hba.conf\" ]
+  - systemctl restart postgresql
+  - [ bash, -c, \"sudo -u postgres psql -tc \\\"SELECT 1 FROM pg_roles WHERE rolname='${PGSQL_USER}'\\\" | grep -q 1 || sudo -u postgres psql -c \\\"CREATE USER ${PGSQL_USER} WITH PASSWORD '${PGSQL_PASSWORD}';\\\"\" ]
+  - [ bash, -c, \"sudo -u postgres psql -tc \\\"SELECT 1 FROM pg_database WHERE datname='${PGSQL_DB}'\\\" | grep -q 1 || sudo -u postgres createdb -O ${PGSQL_USER} ${PGSQL_DB}\" ]"
+    fi
+
+    if $IS_MASTER && [[ "$vm" == "$ADMIN_HOST" ]]; then
         WEED_UNITS+="
   - path: /etc/systemd/system/weed-admin.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=SeaweedFS Admin (dashboard web)
-      After=network-online.target weed-volume.service
+      Description=SeaweedFS Admin (dashboard web -- Enterprise, inclui Recovery)
+      After=network-online.target weed-master.service
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed admin -port=${SEAWEED_ADMIN_PORT} -master=${MASTER_PEERS} -dataDir=${DATA_MOUNT_DIR}/admin
+      ExecStart=/usr/local/bin/weed admin -port=${SEAWEED_ADMIN_PORT} -master=${MASTER_PEERS} -dataDir=${STATE_DIR}/admin
       Restart=on-failure
       RestartSec=5
 
@@ -452,9 +655,33 @@ for vm in "${VM_NAMES[@]}"; do
       WantedBy=multi-user.target
 "
         WEED_RUNCMD+="
-  - mkdir -p ${DATA_MOUNT_DIR}/admin
+  - mkdir -p ${STATE_DIR}/admin
   - systemctl daemon-reload
-  - systemctl enable --now weed-admin.service"
+  - /usr/local/bin/svc-enable-now.sh weed-admin.service"
+    fi
+
+    if [[ "$vm" == "$WORKER_HOST" ]]; then
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-worker.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=SeaweedFS Worker (manutencao em background: EC encode, vacuum, balance)
+      After=network-online.target weed-admin.service
+      Wants=network-online.target
+
+      [Service]
+      ExecStart=/usr/local/bin/weed worker -admin=${VM_IP[$ADMIN_HOST]}:${SEAWEED_ADMIN_PORT} -jobType=all -workingDir=${STATE_DIR}/worker
+      Restart=on-failure
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+"
+        WEED_RUNCMD+="
+  - mkdir -p ${STATE_DIR}/worker
+  - systemctl daemon-reload
+  - /usr/local/bin/svc-enable-now.sh weed-worker.service"
     fi
 
     if [[ "$vm" == "$UPLOAD_DEMO_HOST" ]]; then
@@ -484,7 +711,7 @@ ${UPLOAD_DEMO_HTML_INDENTED}
 "
         WEED_RUNCMD+="
   - systemctl daemon-reload
-  - systemctl enable --now weed-upload-demo.service"
+  - /usr/local/bin/svc-enable-now.sh weed-upload-demo.service"
     fi
 
     cat > "$VM_DIR/user-data" <<EOF
@@ -498,6 +725,7 @@ packages:
   - tar
   - e2fsprogs
   - python3
+${EXTRA_PACKAGES}
 
 users:
   - default
@@ -526,6 +754,23 @@ write_files:
     append: true
     content: |
 ${HOSTS_INDENTED}
+
+  # Com 13 VMs subindo juntas no mesmo host físico, o D-Bus do systemd
+  # de cada VM pode ficar momentaneamente sobrecarregado durante o boot
+  # e recusar um "systemctl enable --now" com "Connection timed out" --
+  # não é erro de configuração, é contenção de CPU/boot. Esse helper
+  # tenta de novo antes de desistir (usado no lugar da chamada direta
+  # nos serviços do SeaweedFS, que sobem mais tarde no runcmd, quando a
+  # carga de boot costuma estar mais alta).
+  - path: /usr/local/bin/svc-enable-now.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      for i in 1 2 3 4 5; do
+          systemctl enable --now "\$1" && exit 0
+          sleep 3
+      done
+      exit 1
 
   # defer: true -- essenciais aqui. write_files roda ANTES do usuário
   # ${VM_USER} ser criado (módulo users-groups vem depois); sem defer,
@@ -558,15 +803,7 @@ runcmd:
   - systemctl enable --now ssh
   - chown -R ${VM_USER}:${VM_USER} /home/${VM_USER}/.ssh
   - chmod 700 /home/${VM_USER}/.ssh
-
-  # --- disco de dados: formata (1x), monta em ${DATA_MOUNT_DIR} e dá o
-  # dono certo ao ${VM_USER} -- sem isso, "weed master/volume/filer"
-  # falha com "permission denied" ao criar suas pastas de estado.
-  - [ bash, -c, "blkid ${DATA_DISK_DEVICE} >/dev/null 2>&1 || mkfs.ext4 -F -L swfs-data ${DATA_DISK_DEVICE}" ]
-  - mkdir -p ${DATA_MOUNT_DIR}
-  - [ bash, -c, "grep -q '^LABEL=swfs-data' /etc/fstab || echo 'LABEL=swfs-data ${DATA_MOUNT_DIR} ext4 defaults 0 2' >> /etc/fstab" ]
-  - mount -a
-  - chown ${VM_USER}:${VM_USER} ${DATA_MOUNT_DIR}
+${DATA_DISK_RUNCMD}
 
   # --- binário do SeaweedFS: baixa com retry (o roteador pode ainda
   # estar de boot quando esta VM já tenta a internet) e instala.
@@ -653,6 +890,16 @@ write_files:
     content: |
 ${HOSTS_INDENTED}
 
+  - path: /usr/local/bin/svc-enable-now.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      for i in 1 2 3 4 5; do
+          systemctl enable --now "\$1" && exit 0
+          sleep 3
+      done
+      exit 1
+
   - path: /etc/sysctl.d/99-swfs-router.conf
     content: |
       net.ipv4.ip_forward=1
@@ -679,7 +926,7 @@ runcmd:
   - chown -R ${VM_USER}:${VM_USER} /home/${VM_USER}/.ssh 2>/dev/null || true
   - sysctl --system
   - systemctl daemon-reload
-  - systemctl enable --now swfs-nat.service
+  - /usr/local/bin/svc-enable-now.sh swfs-nat.service
 EOF
 
 cat > "$ROUTER_DIR/meta-data" <<EOF
