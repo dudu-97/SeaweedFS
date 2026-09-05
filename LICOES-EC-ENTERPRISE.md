@@ -120,20 +120,23 @@ o tamanho real do conteúdo. É por isso que `fullness_ratio=0.95` e
 grande o bastante pra esse piso de 1MB por shard virar irrelevante
 (fração ínfima de 30GB).
 
-**Achado extra, não resolvido**: configuramos `ec.config -set
--dataShards=5 -parityShards=2` (confirmado ativo via `ec.config -get`)
-**antes** do encode. Mesmo assim, contando os arquivos reais no disco,
-cada volume gerou **14 arquivos `.ec00`-`.ec13`** (o esquema clássico
-10+4), não 7. A métrica lógica usou a proporção 5/7 pra estimar o
-"lógico" a partir do físico (bateu matematicamente: físico × 5/7 =
-lógico, com <1KB de erro), mas o **encode físico em si parece ter
-ignorado o ratio configurado** via `weed shell ec.encode` manual. Não
-achamos flag `-dataShards`/`-parityShards` direto no `ec.encode` (só
-existe em `ec.config`). Hipótese não confirmada: o caminho manual do
-shell pode não ler o `ec.conf` salvo pelo `ec.config -set`, só o
-scheduler automático (admin+worker) leria de verdade. **Precisa
-retestar no próximo ambiente pelo caminho automático antes de confiar
-no 5+2 estar realmente ativo.**
+**Achado confirmado (retestado do zero no ambiente reconstruído)**:
+`ec.config -set -dataShards=5 -parityShards=2` (verificado ativo via
+`ec.config -get` antes de qualquer upload) **não é respeitado pelo
+`weed shell ec.encode` manual**. Refizemos o teste do zero — upload de
+um arquivo novo, ratio 5+2 já configurado desde antes, `ec.encode`
+rodado depois — e contamos os arquivos reais no disco: **14 arquivos
+`.ec00`-`.ec13` de novo**, esquema clássico 10+4, não 7. Não é
+timing/cache — é reproduzível. Não existe flag
+`-dataShards`/`-parityShards` no `ec.encode` (só em `ec.config`).
+
+**Conclusão**: o `ec.config` parece só ser consultado pelo caminho
+automático (scheduler do `weed admin` + `weed worker`), não pelo
+comando manual do shell. **Ainda não testamos o caminho automático** —
+é a próxima validação necessária antes de confiar que o 5+2 está
+realmente ativo em produção. Vale reportar como achado reproduzível
+pro suporte/dev da SeaweedFS: `ec.config -set` muda o que `ec.config
+-get` mostra, mas não o que `ec.encode` manual realmente grava.
 
 ## 8. EC não é a "primeira linha de defesa" — replicação é
 
