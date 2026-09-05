@@ -55,12 +55,26 @@ echo "$STATUS_OUT"
 
 banner "Aplicando ratio de erasure coding ${EC_DATA_SHARDS}+${EC_PARITY_SHARDS} (Enterprise)"
 EC_MASTER="${MASTER_HOSTS[0]}"
-if EC_OUT=$(ssh $SSH_OPTS "${VM_USER}@${VM_IP[$EC_MASTER]}" \
-    "echo 'ec.config -set -dataShards=${EC_DATA_SHARDS} -parityShards=${EC_PARITY_SHARDS}' | weed shell -master=localhost:${SEAWEED_MASTER_PORT} 2>&1" 2>&1); then
-    echo "$EC_OUT" | grep -i "ratio set" || echo "$EC_OUT"
-else
-    echo "Aviso: não consegui aplicar o ratio de EC agora -- rode manualmente depois:"
+# O filer pode ainda estar de boot/reiniciando bem nesse instante mesmo
+# com o ./06-status.sh já 200 em tudo (ex: susceptível a corrida com o
+# Postgres) -- tenta algumas vezes antes de desistir e só avisar.
+EC_TRIES=0
+EC_DONE=false
+until $EC_DONE || (( EC_TRIES >= 6 )); do
+    if EC_OUT=$(ssh $SSH_OPTS "${VM_USER}@${VM_IP[$EC_MASTER]}" \
+        "echo 'ec.config -set -dataShards=${EC_DATA_SHARDS} -parityShards=${EC_PARITY_SHARDS}' | weed shell -master=localhost:${SEAWEED_MASTER_PORT} 2>&1" 2>&1) \
+        && grep -qi "ratio set" <<< "$EC_OUT"; then
+        echo "$EC_OUT"
+        EC_DONE=true
+    else
+        EC_TRIES=$((EC_TRIES + 1))
+        sleep 10
+    fi
+done
+if ! $EC_DONE; then
+    echo "Aviso: não consegui aplicar o ratio de EC depois de várias tentativas -- rode manualmente depois:"
     echo "  ssh ${VM_USER}@${VM_IP[$EC_MASTER]} \"echo 'ec.config -set -dataShards=${EC_DATA_SHARDS} -parityShards=${EC_PARITY_SHARDS}' | weed shell -master=localhost:${SEAWEED_MASTER_PORT}\""
+    echo "Último erro: ${EC_OUT:-desconhecido}"
 fi
 
 echo

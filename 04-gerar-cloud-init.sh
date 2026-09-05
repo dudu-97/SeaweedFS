@@ -633,7 +633,13 @@ for vm in "${VM_NAMES[@]}"; do
   - [ bash, -c, \"grep -q '${NET_GATEWAY%.*}.0/${NET_PREFIX}' /etc/postgresql/*/main/pg_hba.conf || echo 'host    all             all             ${NET_GATEWAY%.*}.0/${NET_PREFIX}        scram-sha-256' >> /etc/postgresql/*/main/pg_hba.conf\" ]
   - systemctl restart postgresql
   - [ bash, -c, \"sudo -u postgres psql -tc \\\"SELECT 1 FROM pg_roles WHERE rolname='${PGSQL_USER}'\\\" | grep -q 1 || sudo -u postgres psql -c \\\"CREATE USER ${PGSQL_USER} WITH PASSWORD '${PGSQL_PASSWORD}';\\\"\" ]
-  - [ bash, -c, \"sudo -u postgres psql -tc \\\"SELECT 1 FROM pg_database WHERE datname='${PGSQL_DB}'\\\" | grep -q 1 || sudo -u postgres createdb -O ${PGSQL_USER} ${PGSQL_DB}\" ]"
+  - [ bash, -c, \"sudo -u postgres psql -tc \\\"SELECT 1 FROM pg_database WHERE datname='${PGSQL_DB}'\\\" | grep -q 1 || sudo -u postgres createdb -O ${PGSQL_USER} ${PGSQL_DB}\" ]
+  # A tabela do filer store [postgres] clássico (diferente do [postgres2])
+  # não é criada sozinha -- confirmado ao vivo, filer morre com
+  # 'relation \\\"filemeta\\\" does not exist' sem isso. Schema exato do
+  # comentário do \`weed scaffold -config=filer\`.
+  - [ bash, -c, \"sudo -u postgres psql -d ${PGSQL_DB} -tc \\\"SELECT 1 FROM information_schema.tables WHERE table_name='filemeta'\\\" | grep -q 1 || sudo -u postgres psql -d ${PGSQL_DB} -c 'CREATE TABLE filemeta (dirhash BIGINT, name VARCHAR(65535), directory VARCHAR(65535), meta bytea, PRIMARY KEY (dirhash, name));'\" ]
+  - [ bash, -c, \"sudo -u postgres psql -d ${PGSQL_DB} -c 'GRANT ALL PRIVILEGES ON TABLE filemeta TO ${PGSQL_USER};'\" ]"
     fi
 
     if $IS_MASTER && [[ "$vm" == "$ADMIN_HOST" ]]; then
