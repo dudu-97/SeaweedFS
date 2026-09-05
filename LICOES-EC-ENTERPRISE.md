@@ -138,6 +138,15 @@ realmente ativo em produção. Vale reportar como achado reproduzível
 pro suporte/dev da SeaweedFS: `ec.config -set` muda o que `ec.config
 -get` mostra, mas não o que `ec.encode` manual realmente grava.
 
+**Terceira confirmação, com dado real de 30MB (não mais artefato de
+arquivo minúsculo)**: upload direto num volume (bypassando o
+fragmentador de chunks do filer, pra garantir 1 volume = 1 needle de
+30MB de verdade), `ec.encode` manual com 5+2 já configurado. Resultado:
+**14 arquivos `.ec00`-`.ec13`, cada um exatamente 4.194.304 bytes (4 MiB)
+uniformes** — de novo o layout clássico 10+4. Integridade dos dados
+confirmada por MD5 idêntico antes/depois do EC. Ver
+`RELATO-EC-RATIO-DEV.md` para o relato formal, pronto pra enviar.
+
 ## 8. EC não é a "primeira linha de defesa" — replicação é
 
 Divergência com um colega: ele defendia que o SeaweedFS não deveria
