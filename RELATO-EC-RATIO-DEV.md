@@ -47,10 +47,6 @@ Physical disk usage in all 3 runs matched `bucket_physical_size_bytes` almost ex
 
 Data integrity was verified after EC in run 3 (MD5 identical before/after, read back via the master-resolved file id).
 
-## Question for the dev
-
-1. Is `ec.encode` (the manual shell command) expected to read `/etc/seaweedfs/ec.conf` / the ratio set via `ec.config`, or does it intentionally always use the fixed 10+4 layout regardless of `ec.config`, with the custom ratio only applying to the **automatic** maintenance path (`weed admin` scheduler + `weed worker`, jobType `erasure_coding`/`heavy`)?
-2. If it's meant to apply to `ec.encode` too, is there a flag we're missing (we didn't find `-dataShards`/`-parityShards` on `ec.encode -h`) or a different invocation needed?
-3. We haven't yet been able to validate whether the automatic scheduler path honors the ratio correctly — is that confirmed to work as expected on your side?
-
-Happy to share exact commands/logs for any of the 3 runs if useful, or an `ec.config -get` capture — everything above is reproducible in our lab on demand.
+> A pergunta enviada ao dev (texto exato) não fica duplicada aqui — foi
+> mandada diretamente fora do repositório. O essencial pra reproduzir o
+> achado já está documentado acima (ambiente, passos, evidência).
