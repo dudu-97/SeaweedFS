@@ -156,6 +156,7 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
 </head>
 <body>
 
+<div style="font-size:0.85rem;margin-bottom:16px"><a href="consumo.html">Consumo de dados por bucket &rarr;</a></div>
 <h1>Demo de upload — bucket S3 do SeaweedFS</h1>
 
 <div class="warn">
@@ -445,6 +446,270 @@ ENDHTML
 UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
 UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
 
+# --- página irmã: consumo de dados por bucket (lógico/físico, versão
+# atual vs histórico, retenção) -- serve ao lado da demo de upload,
+# mesmo host/porta, arquivo separado de propósito (escopo diferente:
+# 1 bucket específico, não o cluster inteiro). Sem placeholder de
+# credencial aqui -- reaproveita o de cima.
+CONSUMO_HTML=$(cat <<'ENDCONSUMO'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Consumo de dados — SeaweedFS S3</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  fieldset { border: 1px solid #ccc; border-radius: 6px; margin-bottom: 20px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: block; margin-top: 10px; font-size: 0.85rem; color: #444; }
+  input[type=text], input[type=password] { width: 100%; padding: 6px 8px; margin-top: 2px; box-sizing: border-box; font-family: monospace; }
+  button { margin-top: 14px; padding: 8px 16px; cursor: pointer; }
+  #log { background: #111; color: #0f0; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 6px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #ddd; font-size: 0.85rem; }
+  .warn { background: #fff3cd; border: 1px solid #ffe69c; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; }
+  .nav { font-size: 0.85rem; margin-bottom: 16px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
+  .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px; }
+  .tile .label { font-size: 0.75rem; color: #666; text-transform: uppercase; letter-spacing: 0.03em; }
+  .tile .value { font-family: monospace; font-size: 1.1rem; font-weight: 600; margin-top: 4px; }
+  .bar-track { height: 20px; background: #eee; border-radius: 4px; overflow: hidden; margin-top: 12px; display: flex; }
+  .bar-seg { height: 100%; }
+  .bar-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 0.8rem; color: #444; flex-wrap: wrap; }
+  .bar-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+  .not-shown { background: #f5f5f5; border: 1px dashed #bbb; padding: 10px 12px; border-radius: 6px; font-size: 0.82rem; color: #555; margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<div class="nav"><a href="index.html">&larr; Demo de upload</a></div>
+
+<h1>Consumo de dados — quebra por bucket</h1>
+
+<div class="warn">
+  <strong>Só para aprendizado.</strong> Mesma ressalva da página de upload: a secret key fica no JavaScript do navegador, só aceitável em lab.
+</div>
+
+<fieldset>
+  <legend>1. Como o cliente S3 se conecta</legend>
+  <label>Endpoint (URL do gateway S3)
+    <input type="text" id="endpoint" value="">
+  </label>
+  <label>Bucket
+    <input type="text" id="bucket" value="poc-versioning">
+  </label>
+  <label>Access Key
+    <input type="text" id="accessKey" value="__S3_ACCESS_KEY__">
+  </label>
+  <label>Secret Key
+    <input type="password" id="secretKey" value="__S3_SECRET_KEY__">
+  </label>
+  <button onclick="connect()">Conectar</button>
+</fieldset>
+
+<fieldset>
+  <legend>2. Lógico vs físico (Prometheus, porta separada)</legend>
+  <label>Endpoint de métricas
+    <input type="text" id="metricsEndpoint" value="">
+  </label>
+  <button onclick="checkOverhead()">Consultar</button>
+  <div class="tiles" id="overheadTiles"></div>
+</fieldset>
+
+<fieldset>
+  <legend>3. Versionamento — atual vs. histórico retido</legend>
+  <button onclick="analyzeVersions()">Analisar versões</button>
+  <div class="tiles" id="versionTiles"></div>
+  <div class="bar-track" id="versionBar"></div>
+  <div class="bar-legend" id="versionLegend"></div>
+</fieldset>
+
+<fieldset>
+  <legend>4. Retenção / imutável (Object Lock)</legend>
+  <button onclick="analyzeRetention()">Verificar retenção por versão</button>
+  <p style="font-size:0.8rem;color:#666;margin-top:6px">Faz 1 chamada por versão (GetObjectRetention + GetObjectLegalHold) — processa até 300 versões nesta demo.</p>
+  <div class="tiles" id="retentionTiles"></div>
+</fieldset>
+
+<div class="not-shown">
+  <strong>O que esta página não mostra, de propósito:</strong> quanto do dado já virou Erasure Coding e quanto está marcado pra deletar aguardando vacuum. Essas duas informações são propriedade do <em>volume físico</em>, não do objeto S3 — só existem via administração do cluster (<code>weed shell</code>), nunca por credencial de cliente. Ver <code>COMANDOS-ADMIN.md</code> no repositório do lab.
+</div>
+
+<fieldset>
+  <legend>Log</legend>
+  <div id="log"></div>
+</fieldset>
+
+<script src="https://cdn.jsdelivr.net/npm/aws-sdk@2.1691.0/dist/aws-sdk.min.js"></script>
+<script>
+let s3 = null;
+
+document.getElementById('endpoint').value = window.location.protocol + '//' + window.location.hostname + ':8333';
+document.getElementById('metricsEndpoint').value = window.location.protocol + '//' + window.location.hostname + ':9327/metrics';
+
+function log(msg) {
+  const el = document.getElementById('log');
+  const time = new Date().toLocaleTimeString();
+  el.textContent += `[${time}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+}
+
+function connect() {
+  const endpoint = document.getElementById('endpoint').value.trim();
+  const accessKeyId = document.getElementById('accessKey').value.trim();
+  const secretAccessKey = document.getElementById('secretKey').value.trim();
+
+  AWS.config.update({ accessKeyId, secretAccessKey, region: 'us-east-1' });
+  s3 = new AWS.S3({
+    endpoint: new AWS.Endpoint(endpoint),
+    s3ForcePathStyle: true,
+    signatureVersion: 'v4',
+  });
+  log(`Cliente S3 configurado: endpoint=${endpoint}, accessKey=${accessKeyId}`);
+}
+
+function tile(container, label, value, sub) {
+  const div = document.createElement('div');
+  div.className = 'tile';
+  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div>` + (sub ? `<div class="label" style="text-transform:none;margin-top:4px">${sub}</div>` : '');
+  container.appendChild(div);
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  const units = ['KB','MB','GB','TB'];
+  let u = -1;
+  do { n /= 1024; u++; } while (n >= 1024 && u < units.length - 1);
+  return n.toFixed(2) + ' ' + units[u];
+}
+
+function checkOverhead() {
+  const bucket = document.getElementById('bucket').value.trim();
+  const url = document.getElementById('metricsEndpoint').value.trim();
+  log(`GET ${url} (Prometheus /metrics), filtrando bucket="${bucket}"...`);
+
+  fetch(url).then(r => {
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  }).then(text => {
+    let logical = null, physical = null;
+    text.split('\n').forEach(line => {
+      if (line.startsWith('#')) return;
+      const m = line.match(/^(\S+?)\{([^}]*)\}\s+([0-9.eE+-]+)/);
+      if (!m) return;
+      const [, name, labels, value] = m;
+      if (!labels.includes(`bucket="${bucket}"`)) return;
+      if (name === 'SeaweedFS_s3_bucket_size_bytes') logical = parseFloat(value);
+      if (name === 'SeaweedFS_s3_bucket_physical_size_bytes') physical = parseFloat(value);
+    });
+
+    const container = document.getElementById('overheadTiles');
+    container.innerHTML = '';
+    if (logical === null) {
+      log(`Nenhuma métrica encontrada pro bucket "${bucket}" ainda (sem atividade recente, ou nome errado).`);
+      return;
+    }
+    const overhead = physical - logical;
+    const pct = logical > 0 ? ((overhead / logical) * 100).toFixed(1) : '0.0';
+    tile(container, 'Lógico', fmtBytes(logical), 'todas as versões somadas');
+    tile(container, 'Físico', fmtBytes(physical), 'réplicas + paridade EC + não-vacuumado');
+    tile(container, 'Overhead', fmtBytes(Math.max(overhead, 0)), `+${pct}% sobre o lógico`);
+    log(`OK — lógico=${fmtBytes(logical)}, físico=${fmtBytes(physical)}, overhead=${fmtBytes(Math.max(overhead,0))} (${pct}%). Overhead mistura replicação+EC+lixo não-vacuumado — não dá pra separar qual é qual só com isso.`);
+  }).catch(err => {
+    log(`FALHOU: ${err.message}. Se for erro de rede sem detalhe, pode ser CORS — teste via terminal: curl ${url} | grep bucket`);
+  });
+}
+
+function analyzeVersions() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+  log(`GET ${bucket}/?versions (ListObjectVersions), somando atual vs. histórico...`);
+
+  s3.listObjectVersions({ Bucket: bucket }, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    const versions = data.Versions || [];
+    const markers = data.DeleteMarkers || [];
+    let current = 0, historic = 0;
+    versions.forEach(v => { if (v.IsLatest) current += v.Size; else historic += v.Size; });
+
+    const container = document.getElementById('versionTiles');
+    container.innerHTML = '';
+    const total = current + historic;
+    tile(container, 'Versão atual', fmtBytes(current), (versions.filter(v=>v.IsLatest).length) + ' objeto(s)');
+    tile(container, 'Histórico retido', fmtBytes(historic), (versions.filter(v=>!v.IsLatest).length) + ' versão(ões) antiga(s)');
+    tile(container, 'Delete markers', markers.length, 'chaves sem conteúdo, só marcador');
+    tile(container, '% que é histórico', total > 0 ? ((historic/total)*100).toFixed(1) + '%' : '0%', 'do total lógico deste bucket');
+
+    const bar = document.getElementById('versionBar');
+    bar.innerHTML = '';
+    if (total > 0) {
+      const curSeg = document.createElement('div');
+      curSeg.className = 'bar-seg';
+      curSeg.style.width = (current/total*100) + '%';
+      curSeg.style.background = '#2f8f5b';
+      const histSeg = document.createElement('div');
+      histSeg.className = 'bar-seg';
+      histSeg.style.width = (historic/total*100) + '%';
+      histSeg.style.background = '#b87a1e';
+      bar.appendChild(curSeg);
+      bar.appendChild(histSeg);
+    }
+    document.getElementById('versionLegend').innerHTML =
+      '<span><span class="sw" style="background:#2f8f5b"></span>versão atual</span>' +
+      '<span><span class="sw" style="background:#b87a1e"></span>histórico retido (não-atual)</span>';
+
+    log(`OK — ${versions.length} versão(ões) real(is) + ${markers.length} delete marker(s). Atual=${fmtBytes(current)}, histórico=${fmtBytes(historic)}.`);
+  });
+}
+
+function analyzeRetention() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+  log(`GET ${bucket}/?versions, depois GetObjectRetention/GetObjectLegalHold por versão...`);
+
+  s3.listObjectVersions({ Bucket: bucket }, (err, data) => {
+    if (err) { log(`FALHOU ao listar versões: ${err.message}`); return; }
+    const versions = (data.Versions || []).slice(0, 300);
+    if (versions.length === 0) { log('Nenhuma versão pra checar.'); return; }
+
+    let lockedBytes = 0, lockedCount = 0, legalHoldBytes = 0, legalHoldCount = 0, checked = 0;
+    const now = new Date();
+
+    versions.forEach(v => {
+      s3.getObjectRetention({ Bucket: bucket, Key: v.Key, VersionId: v.VersionId }, (err, ret) => {
+        if (!err && ret.Retention && ret.Retention.RetainUntilDate && new Date(ret.Retention.RetainUntilDate) > now) {
+          lockedBytes += v.Size;
+          lockedCount++;
+        }
+        s3.getObjectLegalHold({ Bucket: bucket, Key: v.Key, VersionId: v.VersionId }, (err2, hold) => {
+          if (!err2 && hold.LegalHold && hold.LegalHold.Status === 'ON') {
+            legalHoldBytes += v.Size;
+            legalHoldCount++;
+          }
+          checked++;
+          if (checked === versions.length) {
+            const container = document.getElementById('retentionTiles');
+            container.innerHTML = '';
+            tile(container, 'Sob retenção ativa', fmtBytes(lockedBytes), lockedCount + ' versão(ões)');
+            tile(container, 'Sob legal hold', fmtBytes(legalHoldBytes), legalHoldCount + ' versão(ões)');
+            tile(container, 'Verificadas', checked + ' / ' + (data.Versions||[]).length, versions.length < (data.Versions||[]).length ? 'limitado a 300 nesta demo' : 'todas');
+            log(`OK — checadas ${checked} versões. ${lockedCount} sob retenção ativa (${fmtBytes(lockedBytes)}), ${legalHoldCount} sob legal hold (${fmtBytes(legalHoldBytes)}).`);
+          }
+        });
+      });
+    });
+  });
+}
+</script>
+
+</body>
+</html>
+ENDCONSUMO
+)
+CONSUMO_HTML="${CONSUMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
+CONSUMO_HTML="${CONSUMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
+
 for vm in "${VM_NAMES[@]}"; do
     VM_DIR="$LAB_DIR/$vm"
     mkdir -p "$VM_DIR"
@@ -692,11 +957,17 @@ for vm in "${VM_NAMES[@]}"; do
 
     if [[ "$vm" == "$UPLOAD_DEMO_HOST" ]]; then
         UPLOAD_DEMO_HTML_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_HTML" | indent "      ")
+        CONSUMO_HTML_INDENTED=$(printf '%s\n' "$CONSUMO_HTML" | indent "      ")
         WEED_UNITS+="
   - path: /var/www/upload-demo/index.html
     permissions: '0644'
     content: |
 ${UPLOAD_DEMO_HTML_INDENTED}
+
+  - path: /var/www/upload-demo/consumo.html
+    permissions: '0644'
+    content: |
+${CONSUMO_HTML_INDENTED}
 
   - path: /etc/systemd/system/weed-upload-demo.service
     permissions: '0644'
