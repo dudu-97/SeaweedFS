@@ -182,6 +182,16 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
 </fieldset>
 
 <fieldset>
+  <legend>4. Versionamento e lifecycle</legend>
+  <button onclick="checkVersioning()">Status do versionamento</button>
+  <button onclick="listVersions()">Listar versões (inclui excluídas)</button>
+  <table id="verTable">
+    <thead><tr><th>Chave</th><th>Version ID</th><th>Tipo</th><th>Atual?</th><th>Modificado</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+</fieldset>
+
+<fieldset>
   <legend>Log (o que a página está mandando pro S3, passo a passo)</legend>
   <div id="log"></div>
 </fieldset>
@@ -253,6 +263,58 @@ function listObjects() {
       tbody.appendChild(tr);
     });
     log(`OK — ${(data.Contents || []).length} objeto(s) no bucket.`);
+  });
+}
+
+function checkVersioning() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+
+  log(`GET ${bucket}/?versioning (GetBucketVersioning)...`);
+  s3.getBucketVersioning({ Bucket: bucket }, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    log(`Status = "${data.Status || '(nunca habilitado)'}" — sem "Enabled", o lifecycle não tem versão antiga pra expirar, só o objeto atual.`);
+  });
+}
+
+function listVersions() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+
+  log(`GET ${bucket}/?versions (ListObjectVersions)...`);
+  s3.listObjectVersions({ Bucket: bucket }, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    const rows = [
+      ...(data.Versions || []).map(v => ({ ...v, type: 'Versão' })),
+      ...(data.DeleteMarkers || []).map(v => ({ ...v, type: 'Delete marker' })),
+    ].sort((a, b) => a.Key === b.Key ? new Date(b.LastModified) - new Date(a.LastModified) : a.Key.localeCompare(b.Key));
+
+    const tbody = document.querySelector('#verTable tbody');
+    tbody.innerHTML = '';
+    rows.forEach(v => {
+      const tr = document.createElement('tr');
+      const btn = document.createElement('button');
+      btn.textContent = 'Apagar esta versão';
+      btn.onclick = () => deleteVersion(v.Key, v.VersionId);
+      tr.innerHTML = `<td>${v.Key}</td><td style="font-family:monospace">${v.VersionId}</td><td>${v.type}</td><td>${v.IsLatest ? 'sim' : 'não'}</td><td>${new Date(v.LastModified).toLocaleString()}</td>`;
+      const td = document.createElement('td');
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    });
+    log(`OK — ${rows.length} entrada(s) (versões + delete markers). "Apagar esta versão" remove só aquele VersionId específico — bem diferente de apagar a chave normal, que (com versionamento ligado) só cria um delete marker novo em vez de sumir com o histórico.`);
+  });
+}
+
+function deleteVersion(key, versionId) {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+
+  log(`DELETE ${bucket}/${key}?versionId=${versionId}...`);
+  s3.deleteObject({ Bucket: bucket, Key: key, VersionId: versionId }, (err) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    log(`OK — versão ${versionId} de "${key}" apagada de vez (esse delete específico não é reversível nem cria delete marker).`);
+    listVersions();
   });
 }
 </script>
