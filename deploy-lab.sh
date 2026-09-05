@@ -53,6 +53,16 @@ done
 banner "06-status.sh"
 echo "$STATUS_OUT"
 
+banner "Aplicando ratio de erasure coding ${EC_DATA_SHARDS}+${EC_PARITY_SHARDS} (Enterprise)"
+EC_MASTER="${MASTER_HOSTS[0]}"
+if EC_OUT=$(ssh $SSH_OPTS "${VM_USER}@${VM_IP[$EC_MASTER]}" \
+    "echo 'ec.config -set -dataShards=${EC_DATA_SHARDS} -parityShards=${EC_PARITY_SHARDS}' | weed shell -master=localhost:${SEAWEED_MASTER_PORT} 2>&1" 2>&1); then
+    echo "$EC_OUT" | grep -i "ratio set" || echo "$EC_OUT"
+else
+    echo "Aviso: não consegui aplicar o ratio de EC agora -- rode manualmente depois:"
+    echo "  ssh ${VM_USER}@${VM_IP[$EC_MASTER]} \"echo 'ec.config -set -dataShards=${EC_DATA_SHARDS} -parityShards=${EC_PARITY_SHARDS}' | weed shell -master=localhost:${SEAWEED_MASTER_PORT}\""
+fi
+
 echo
 echo -e "\e[1;32mLab pronto — cluster SeaweedFS de pé (master/volume/filer/S3).\e[0m Acesso:"
 echo
