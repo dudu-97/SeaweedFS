@@ -7,13 +7,13 @@ já rodando, EC 5+2 configurado — e outro comando desmonta tudo.
 
 ## Objetivo do projeto
 
-Reproduzir, num único host de lab, uma versão simplificada da arquitetura de
-storage da empresa (LVS + S3 front + master/filer + PostgreSQL + 7 volume
-nodes com erasure coding 5+2) para estudar e validar comportamento antes de
-levar decisões pra produção. Nenhum passo de infraestrutura é manual — da VM
-em branco ao cluster respondendo é tudo `./deploy-lab.sh`. Cada rodada de
-teste vira um documento de POC isolado (ver `POCS.md` e
-`HISTORICO.md`) em vez de anotação solta.
+Laboratório completo de storage distribuído com SeaweedFS — S3 front,
+master/filer, PostgreSQL como metadata store e 7 volume nodes com erasure
+coding 5+2 — pra estudar e validar comportamento do sistema na prática.
+Nenhum passo de infraestrutura é manual — da VM em branco ao cluster
+respondendo é tudo `./deploy-lab.sh`. Cada rodada de teste vira um
+documento de POC isolado (ver `POCS.md` e `HISTORICO.md`) em vez de
+anotação solta.
 
 ## Instalação rápida (clonando pela primeira vez)
 
@@ -49,8 +49,7 @@ cluster inteiro responder. Confira com `./06-status.sh` — espera-se
 
 ## Arquitetura
 
-13 VMs Ubuntu Server 24.04 (12 do cluster + 1 roteador), modeladas na
-arquitetura de produção da empresa, simplificada para caber em 1 host:
+13 VMs Ubuntu Server 24.04 (12 do cluster + 1 roteador):
 
 ```
                          rede "default" (NAT do KVM, já existente)
@@ -82,9 +81,9 @@ arquitetura de produção da empresa, simplificada para caber em 1 host:
 
 Por que essa topologia (e não a mínima):
 - **3 masters** — Raft precisa de quorum ímpar ≥3 para eleição/failover ter algo a demonstrar.
-- **`weed s3` separado do filer** (`swfs-s3front1`) — no diagrama da empresa é o papel do LVS+s3front na frente dos filers; aqui, 1 VM standalone que fala com os 3 filers, sem LVS de verdade (lab de 1 usuário não precisa de HA nesse ponto de entrada).
-- **PostgreSQL como metadata store** (`swfs-pgsql01`) — substitui o LevelDB local de cada filer, que era o gargalo de concorrência citado pela empresa; os 3 filers compartilham o mesmo banco.
-- **7 volume nodes, 1 processo + 8 discos independentes cada, 1 rack por node** — modela os servidores reais da empresa (8 servidores físicos, 8 discos cada; este lab usa 7 ativos, o mesmo padrão de "1 desligado" do ambiente real). Discos independentes (não pastas de 1 disco só) de propósito: cada um vira um device/filesystem próprio, então o `statfs` que o `weed volume` usa pra reportar espaço livre sai correto por disco — ver `HISTORICO.md` sobre o bug de capacidade em dobro que uma topologia de "processos dividindo 1 disco" causava. Alvo do erasure coding 5+2 (5 dados + 2 paridade = 7 shards, 1 por node): perde-se até 2 racks/nodes e o dado ainda é reconstruível.
+- **`weed s3` separado do filer** (`swfs-s3front1`) — gateway S3 standalone, 1 VM que fala com os 3 filers, sem depender de nenhum deles individualmente pra atender requisição.
+- **PostgreSQL como metadata store** (`swfs-pgsql01`) — substitui o LevelDB local de cada filer, que vira gargalo de concorrência quando múltiplos filers escrevem ao mesmo tempo; os 3 filers compartilham o mesmo banco.
+- **7 volume nodes, 1 processo + 8 discos independentes cada, 1 rack por node** — discos independentes (não pastas de 1 disco só) de propósito: cada um vira um device/filesystem próprio, então o `statfs` que o `weed volume` usa pra reportar espaço livre sai correto por disco — ver `HISTORICO.md` sobre o bug de capacidade em dobro que uma topologia de "processos dividindo 1 disco" causava. Alvo do erasure coding 5+2 (5 dados + 2 paridade = 7 shards, 1 por node): perde-se até 2 racks/nodes e o dado ainda é reconstruível.
 
 ## Requisitos
 

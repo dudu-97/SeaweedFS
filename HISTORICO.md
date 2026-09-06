@@ -371,8 +371,8 @@ Pergunta direta do usuário: por que o dashboard admin (`/cluster/volume-servers
 
 **Veredito**: não é um bug clássico do SeaweedFS (o `statfs` por processo está correto — é o comportamento padrão de qualquer ferramenta baseada nele, `df` inclusive). É uma consequência direta da topologia do lab: 2 processos `weed volume` **compartilhando 1 disco físico só**, artifício usado pra simular "2 discos por node" com metade do hardware. Em produção (1 processo por servidor, cada disco um device de verdade) isso nunca aconteceria.
 
-**Correção aplicada** (a pedido do usuário, pra aproximar da topologia real da empresa: 8 servidores, 1 desligado, 7 ativos, 8 discos de verdade cada):
-- `00-config.env`: `VOLUME_DISKS_PER_NODE=8` discos **independentes** por volume node (arquivos `.qcow2` separados = devices virtio separados, não partições de 1 disco), 9GB cada (504GB brutos no total — escala de lab, mantendo a lógica dos 8 discos reais da empresa sem tentar replicar os 20TB/disco literais).
+**Correção aplicada** (a pedido do usuário, trocando os 2 processos por 1 processo por node com 8 discos de verdade cada):
+- `00-config.env`: `VOLUME_DISKS_PER_NODE=8` discos **independentes** por volume node (arquivos `.qcow2` separados = devices virtio separados, não partições de 1 disco), 9GB cada (504GB brutos no total).
 - `02-criar-discos.sh` / `05-criar-vms.sh`: criam e anexam os 8 discos (`-data1.qcow2` .. `-data8.qcow2`) como devices separados (`/dev/vdb` .. `/dev/vdi`).
 - `04-gerar-cloud-init.sh`: cada device formatado e montado em `/data/disk1` .. `/data/disk8` (8 filesystems reais, não 8 pastas de 1 filesystem); **1 processo `weed volume` por node** (não mais 2), usando `-dir=/data/disk1,/data/disk2,...,/data/disk8` — é o jeito nativo do SeaweedFS de gerenciar um servidor multi-disco, e resolve o double-counting na raiz (cada disco vira um `statfs` próprio).
 - `06-status.sh`: checagem de disco/serviço ajustada pra 1 processo + N mountpoints.

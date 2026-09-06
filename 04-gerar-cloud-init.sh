@@ -792,7 +792,8 @@ for vm in "${VM_NAMES[@]}"; do
         # Todo master roda um filer junto (era 1 VM dedicada antes; agora
         # os 3 masters/filers dividem carga e o s3front fala com qualquer
         # um deles). Metadado vai pro Postgres (pgsql01), não LevelDB
-        # local -- é o gargalo de concorrência citado pela empresa.
+        # local -- LevelDB embutido vira gargalo de concorrência com
+        # múltiplos filers escrevendo ao mesmo tempo.
         # O filer.toml é gerado ONE-SHOT via `weed scaffold` (contém o
         # template padrão inteiro, com [postgres] desabilitado); a
         # conexão de verdade entra via variável de ambiente no service

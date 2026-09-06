@@ -14,7 +14,7 @@
   <rect x="0" y="0" width="1500" height="980" fill="#ffffff"/>
 
   <text x="750" y="32" text-anchor="middle" font-size="22" font-weight="bold" fill="#1a1a1a">Lab SeaweedFS Enterprise — arquitetura (13 VMs)</text>
-  <text x="750" y="52" text-anchor="middle" font-size="12" fill="#666">7 servidores de volume ativos (padrão da empresa: 8 no total, 1 desligado), cada um com 8 discos independentes</text>
+  <text x="750" y="52" text-anchor="middle" font-size="12" fill="#666">7 volume nodes, cada um com 1 processo `weed volume` e 8 discos independentes</text>
 
   <!-- WAN -->
   <rect x="560" y="68" width="380" height="30" rx="6" fill="none" stroke="#999" stroke-dasharray="5,3"/>
@@ -72,7 +72,7 @@
   <text x="1170" y="326" text-anchor="middle" font-size="10" fill="#666">:5432</text>
 
   <!-- Row B: 7 volume nodes -->
-  <text x="40" y="380" font-size="13" font-weight="bold" fill="#1e8449">Volume nodes (7 ativos de 8 — 1 desligado, igual à empresa):</text>
+  <text x="40" y="380" font-size="13" font-weight="bold" fill="#1e8449">Volume nodes (7x, 1 processo + 8 discos independentes cada):</text>
 
   <g id="volnodes">
     <!-- node01 (destacado, tem o detalhe abaixo) -->
@@ -244,16 +244,12 @@
   <text x="1220" y="716" text-anchor="middle" font-size="10.5" fill="#12522e">7 nodes x 8 x 9GB = 504GB reais no total</text>
   <text x="1220" y="732" text-anchor="middle" font-size="10.5" fill="#12522e">dashboard passa a bater com o disco físico</text>
 
-  <text x="660" y="790" font-size="10.5" fill="#555">Real da empresa: 8 servidores (1 desligado), 8 discos de ~20TB cada — em RAID0,</text>
-  <text x="660" y="805" font-size="10.5" fill="#555">cai pra ~18TB usável por disco depois de formatado. Este lab reproduz a</text>
-  <text x="660" y="820" font-size="10.5" fill="#555">MESMA estrutura (8 discos independentes/servidor) em escala reduzida (9GB/disco).</text>
-
   <!-- legend -->
-  <text x="660" y="855" font-size="11" font-weight="bold" fill="#333">Legenda</text>
-  <rect x="660" y="864" width="14" height="14" fill="#dbe9ff" stroke="#3366cc"/><text x="680" y="875" font-size="10.5" fill="#333">master (raft) + filer</text>
-  <rect x="820" y="864" width="14" height="14" fill="#f3e0ff" stroke="#8a2be2"/><text x="840" y="875" font-size="10.5" fill="#333">S3 gateway</text>
-  <rect x="940" y="864" width="14" height="14" fill="#ffe9cc" stroke="#e08a00"/><text x="960" y="875" font-size="10.5" fill="#333">PostgreSQL</text>
-  <rect x="1060" y="864" width="14" height="14" fill="#d9f2e3" stroke="#1e8449"/><text x="1080" y="875" font-size="10.5" fill="#333">volume node (7x, 8 discos cada)</text>
+  <text x="660" y="805" font-size="11" font-weight="bold" fill="#333">Legenda</text>
+  <rect x="660" y="816" width="14" height="14" fill="#dbe9ff" stroke="#3366cc"/><text x="680" y="827" font-size="10.5" fill="#333">master (raft) + filer</text>
+  <rect x="820" y="816" width="14" height="14" fill="#f3e0ff" stroke="#8a2be2"/><text x="840" y="827" font-size="10.5" fill="#333">S3 gateway</text>
+  <rect x="940" y="816" width="14" height="14" fill="#ffe9cc" stroke="#e08a00"/><text x="960" y="827" font-size="10.5" fill="#333">PostgreSQL</text>
+  <rect x="1060" y="816" width="14" height="14" fill="#d9f2e3" stroke="#1e8449"/><text x="1080" y="827" font-size="10.5" fill="#333">volume node (7x, 8 discos cada)</text>
 
   <text x="750" y="960" text-anchor="middle" font-size="10.5" fill="#888">Gerado a partir do 00-config.env vigente (VOLUME_DISKS_PER_NODE=8) — ver README.md e HISTORICO.md (seção 2.14) para o histórico completo.</text>
 </svg>
