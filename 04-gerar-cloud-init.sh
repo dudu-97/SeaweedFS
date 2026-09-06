@@ -996,6 +996,7 @@ ${CONSUMO_HTML_INDENTED}
 hostname: ${vm}
 fqdn: ${vm}.${LAB_DOMAIN}
 manage_etc_hosts: false
+timezone: America/Sao_Paulo
 
 packages:
   - curl
@@ -1135,6 +1136,7 @@ cat > "$ROUTER_DIR/user-data" <<EOF
 hostname: ${ROUTER_NAME}
 fqdn: ${ROUTER_NAME}.${LAB_DOMAIN}
 manage_etc_hosts: false
+timezone: America/Sao_Paulo
 
 packages:
   - iptables
