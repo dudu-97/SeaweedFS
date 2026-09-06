@@ -19,7 +19,7 @@ teste vira um documento de POC isolado (ver `POCS.md` e
 
 - **Linux no host** (depende de KVM/libvirt — não roda em Windows/Mac).
 - **Virtualização habilitada na BIOS/UEFI** (Intel VT-x / AMD-V) — confirme com `kvm-ok || ls /dev/kvm`.
-- **~19 GB de RAM livre** e **~640 GB de disco livre** (thin-provisioned — uso real inicial é bem menor; veja "Requisitos" abaixo para o detalhamento).
+- **~19 GB de RAM livre** e **~650 GB de disco livre** (thin-provisioned — uso real inicial é bem menor; veja "Requisitos" abaixo para o detalhamento).
 
 ```bash
 git clone <url-do-repositorio>
@@ -63,10 +63,12 @@ arquitetura de produção da empresa, simplificada para caber em 1 host:
         ┌────────────┬────────────┬───────┴────┬─────────────┬──────────────────────────┐
    swfs-master1  swfs-master2  swfs-master3  swfs-s3front1  swfs-pgsql01   swfs-node01..07
     .11 (raft)     .12 (raft)    .13 (raft)      .31            .41         .51-.57
-   +filer+admin    +filer        +filer      S3 gateway     PostgreSQL    volume x2/node
+   +filer+admin    +filer        +filer      S3 gateway     PostgreSQL    volume, 8 discos
    +worker                                    standalone    (metadata      (7 racks,
                                                               dos filers)   EC 5+2)
 ```
+
+![Arquitetura do lab: rede, VMs e os 8 discos independentes de cada volume node](relatorio-assets/arquitetura-lab.svg)
 
 | VM | Papel | IP | RAM | vCPU | Disco |
 |---|---|---|---|---|---|
@@ -76,13 +78,13 @@ arquitetura de produção da empresa, simplificada para caber em 1 host:
 | swfs-master3 | `weed master` (raft) + `weed filer` | 192.168.100.13 | 1536 MB | 1 | 12 GB |
 | swfs-s3front1 | `weed s3` standalone (gateway S3 puro, aponta pros 3 filers) | 192.168.100.31 | 1024 MB | 1 | 10 GB |
 | swfs-pgsql01 | PostgreSQL — metadata store dos 3 filers (troca o LevelDB embutido) | 192.168.100.41 | 1536 MB | 1 | 20 GB |
-| swfs-node01..07 | `weed volume` × 2 processos cada (simula 2 discos/node) = 14 volume servers, 1 por rack (rack1-rack7) | 192.168.100.51-.57 | 1536 MB cada | 1 cada | 10 GB SO + 70 GB dados cada |
+| swfs-node01..07 | `weed volume` — 1 processo por node, dono de 8 discos independentes = 7 volume servers, 1 por rack (rack1-rack7) | 192.168.100.51-.57 | 1536 MB cada | 1 cada | 10 GB SO + 8× 9 GB dados (discos separados) cada |
 
 Por que essa topologia (e não a mínima):
 - **3 masters** — Raft precisa de quorum ímpar ≥3 para eleição/failover ter algo a demonstrar.
 - **`weed s3` separado do filer** (`swfs-s3front1`) — no diagrama da empresa é o papel do LVS+s3front na frente dos filers; aqui, 1 VM standalone que fala com os 3 filers, sem LVS de verdade (lab de 1 usuário não precisa de HA nesse ponto de entrada).
 - **PostgreSQL como metadata store** (`swfs-pgsql01`) — substitui o LevelDB local de cada filer, que era o gargalo de concorrência citado pela empresa; os 3 filers compartilham o mesmo banco.
-- **7 volume nodes × 2 processos = 14 volume servers, 1 rack cada** — alvo do erasure coding 5+2 (5 dados + 2 paridade = 7 shards, 1 por node): perde-se até 2 racks/nodes e o dado ainda é reconstruível.
+- **7 volume nodes, 1 processo + 8 discos independentes cada, 1 rack por node** — modela os servidores reais da empresa (8 servidores físicos, 8 discos cada; este lab usa 7 ativos, o mesmo padrão de "1 desligado" do ambiente real). Discos independentes (não pastas de 1 disco só) de propósito: cada um vira um device/filesystem próprio, então o `statfs` que o `weed volume` usa pra reportar espaço livre sai correto por disco — ver `HISTORICO.md` sobre o bug de capacidade em dobro que uma topologia de "processos dividindo 1 disco" causava. Alvo do erasure coding 5+2 (5 dados + 2 paridade = 7 shards, 1 por node): perde-se até 2 racks/nodes e o dado ainda é reconstruível.
 
 ## Requisitos
 
@@ -93,7 +95,7 @@ Por que essa topologia (e não a mínima):
 | RAM | ~18,5 GB | masters 3×1536 + s3front 1024 + pgsql 1536 + nodes 7×1536 + router 1024 (MB) |
 | vCPU | 13 | 1 por VM (aceita overcommit do KVM) |
 | Disco (SO) | ~146 GB | masters 3×12 + s3front 10 + pgsql 20 + nodes 7×10 + router 10 (GB) |
-| Disco (dados) | ~490 GB | só os 7 volume nodes, 70 GB cada — 490 GB brutos, ~350 GB úteis com EC 5+2 (eficiência 5/7) |
+| Disco (dados) | ~504 GB | só os 7 volume nodes, 8 discos independentes de 9 GB cada (72 GB/node) — 504 GB brutos, ~360 GB úteis com EC 5+2 (eficiência 5/7) |
 | Virtualização | `/dev/kvm` presente | confirme com `kvm-ok` (pacote `cpu-checker`) ou `ls /dev/kvm` |
 
 Os discos são thin-provisioned (qcow2 com backing file) — o espaço acima é o
@@ -187,7 +189,7 @@ dentro da própria VM** (evita depender de rota do host) e reporta o código:
 | swfs-s3front1 | métricas S3 (Prometheus) | 9327 | `/metrics` |
 | swfs-s3front1 | página de demo de upload S3 | 8090 | HTTP 200 |
 | swfs-pgsql01 | PostgreSQL | 5432 | `systemctl is-active postgresql` |
-| swfs-node01..07 | volume (×2 processos) | 8080, 8081 | `/status` → HTTP 200 |
+| swfs-node01..07 | volume (1 processo, 8 discos) | 8080 | `/status` → HTTP 200 |
 
 A API S3 exige credenciais: `weed s3` sobe com `-s3.config` apontando pro
 `s3.json` gerado no cloud-init (identidade `S3_ACCESS_KEY`/`S3_SECRET_KEY`
@@ -329,10 +331,11 @@ curl -s "http://localhost:9333/cluster/status?pretty=y"
 curl -s "http://localhost:9333/dir/status?pretty=y"      # topologia: dc/racks/volume servers
 journalctl -u weed-master -f
 
-# Volume (swfs-node01..07, portas 8080/8081)
+# Volume (swfs-node01..07, porta 8080, 1 processo com 8 discos independentes)
 curl -sI "http://localhost:8080/healthz"
-curl -s  "http://localhost:8080/status?pretty=y"
-df -h /data
+curl -s  "http://localhost:8080/status?pretty=y"   # inclui DiskStatuses -- 1 entrada por disco, cada um com seu próprio statfs
+journalctl -u weed-volume -f
+df -h /data/disk*   # cada disco é um device/filesystem separado -- não existe 1 "df -h /data" só
 
 # Filer (swfs-master1/2/3, porta 8888)
 curl -H "Accept: application/json" "http://localhost:8888/buckets/?pretty=y"

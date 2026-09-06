@@ -1,0 +1,259 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 980" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#555"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#1e8449"/>
+    </marker>
+    <marker id="arrowRed" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#c0392b"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1500" height="980" fill="#ffffff"/>
+
+  <text x="750" y="32" text-anchor="middle" font-size="22" font-weight="bold" fill="#1a1a1a">Lab SeaweedFS Enterprise — arquitetura (13 VMs)</text>
+  <text x="750" y="52" text-anchor="middle" font-size="12" fill="#666">7 servidores de volume ativos (padrão da empresa: 8 no total, 1 desligado), cada um com 8 discos independentes</text>
+
+  <!-- WAN -->
+  <rect x="560" y="68" width="380" height="30" rx="6" fill="none" stroke="#999" stroke-dasharray="5,3"/>
+  <text x="750" y="88" text-anchor="middle" font-size="13" fill="#555">rede "default" (NAT do KVM) — 192.168.122.0/24</text>
+  <line x1="750" y1="98" x2="750" y2="112" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Router -->
+  <rect x="650" y="112" width="200" height="66" rx="10" fill="#eef1f3" stroke="#6c757d" stroke-width="2"/>
+  <text x="750" y="134" text-anchor="middle" font-size="14" font-weight="bold" fill="#333">swfs-router</text>
+  <text x="750" y="150" text-anchor="middle" font-size="11" fill="#444">WAN 192.168.122.150</text>
+  <text x="750" y="164" text-anchor="middle" font-size="11" fill="#444">LAN 192.168.100.1 (gateway)</text>
+  <line x1="750" y1="178" x2="750" y2="200" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Isolated network container -->
+  <rect x="30" y="200" width="1440" height="750" rx="14" fill="#fafcfb" stroke="#999" stroke-dasharray="6,4" stroke-width="1.5"/>
+  <text x="50" y="222" font-size="13" font-style="italic" fill="#555">rede isolada seaweedfs-lab — 192.168.100.0/24 (sem DHCP, sem NAT, roteada só via swfs-router)</text>
+
+  <!-- Row A: masters + s3front + pgsql -->
+  <!-- master1 -->
+  <rect x="235" y="248" width="190" height="88" rx="8" fill="#dbe9ff" stroke="#3366cc" stroke-width="1.5"/>
+  <text x="330" y="268" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a3a7a">swfs-master1</text>
+  <text x="330" y="283" text-anchor="middle" font-size="11" fill="#333">192.168.100.11</text>
+  <text x="330" y="298" text-anchor="middle" font-size="11" fill="#333">master (raft) + filer</text>
+  <text x="330" y="312" text-anchor="middle" font-size="11" font-weight="bold" fill="#1a3a7a">+ admin + worker</text>
+  <text x="330" y="326" text-anchor="middle" font-size="10" fill="#666">:9333 :8888 :23646</text>
+
+  <!-- master2 -->
+  <rect x="445" y="248" width="190" height="88" rx="8" fill="#dbe9ff" stroke="#3366cc" stroke-width="1.5"/>
+  <text x="540" y="268" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a3a7a">swfs-master2</text>
+  <text x="540" y="283" text-anchor="middle" font-size="11" fill="#333">192.168.100.12</text>
+  <text x="540" y="298" text-anchor="middle" font-size="11" fill="#333">master (raft) + filer</text>
+  <text x="540" y="320" text-anchor="middle" font-size="10" fill="#666">:9333 :8888</text>
+
+  <!-- master3 -->
+  <rect x="655" y="248" width="190" height="88" rx="8" fill="#dbe9ff" stroke="#3366cc" stroke-width="1.5"/>
+  <text x="750" y="268" text-anchor="middle" font-size="13" font-weight="bold" fill="#1a3a7a">swfs-master3</text>
+  <text x="750" y="283" text-anchor="middle" font-size="11" fill="#333">192.168.100.13</text>
+  <text x="750" y="298" text-anchor="middle" font-size="11" fill="#333">master (raft) + filer</text>
+  <text x="750" y="320" text-anchor="middle" font-size="10" fill="#666">:9333 :8888</text>
+
+  <!-- s3front -->
+  <rect x="865" y="248" width="190" height="88" rx="8" fill="#f3e0ff" stroke="#8a2be2" stroke-width="1.5"/>
+  <text x="960" y="268" text-anchor="middle" font-size="13" font-weight="bold" fill="#5a1a99">swfs-s3front1</text>
+  <text x="960" y="283" text-anchor="middle" font-size="11" fill="#333">192.168.100.31</text>
+  <text x="960" y="298" text-anchor="middle" font-size="11" fill="#333">S3 gateway</text>
+  <text x="960" y="312" text-anchor="middle" font-size="11" fill="#333">standalone</text>
+  <text x="960" y="326" text-anchor="middle" font-size="10" fill="#666">:8333</text>
+
+  <!-- pgsql -->
+  <rect x="1075" y="248" width="190" height="88" rx="8" fill="#ffe9cc" stroke="#e08a00" stroke-width="1.5"/>
+  <text x="1170" y="268" text-anchor="middle" font-size="13" font-weight="bold" fill="#8a5200">swfs-pgsql01</text>
+  <text x="1170" y="283" text-anchor="middle" font-size="11" fill="#333">192.168.100.41</text>
+  <text x="1170" y="298" text-anchor="middle" font-size="11" fill="#333">PostgreSQL</text>
+  <text x="1170" y="312" text-anchor="middle" font-size="11" fill="#333">metadata dos filers</text>
+  <text x="1170" y="326" text-anchor="middle" font-size="10" fill="#666">:5432</text>
+
+  <!-- Row B: 7 volume nodes -->
+  <text x="40" y="380" font-size="13" font-weight="bold" fill="#1e8449">Volume nodes (7 ativos de 8 — 1 desligado, igual à empresa):</text>
+
+  <g id="volnodes">
+    <!-- node01 (destacado, tem o detalhe abaixo) -->
+    <rect x="40" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="2.5"/>
+    <text x="135" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node01</text>
+    <text x="135" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.51 · rack1</text>
+    <text x="135" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="135" y="456" text-anchor="middle" font-size="11" font-weight="bold" fill="#12522e">8 discos independentes</text>
+    <text x="135" y="470" text-anchor="middle" font-size="10" fill="#666">:8080 — ver detalhe ↓</text>
+
+    <rect x="245" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="1.5"/>
+    <text x="340" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node02</text>
+    <text x="340" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.52 · rack2</text>
+    <text x="340" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="340" y="456" text-anchor="middle" font-size="11" fill="#333">8 discos independentes</text>
+    <text x="340" y="470" text-anchor="middle" font-size="10" fill="#666">:8080</text>
+
+    <rect x="450" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="1.5"/>
+    <text x="545" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node03</text>
+    <text x="545" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.53 · rack3</text>
+    <text x="545" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="545" y="456" text-anchor="middle" font-size="11" fill="#333">8 discos independentes</text>
+    <text x="545" y="470" text-anchor="middle" font-size="10" fill="#666">:8080</text>
+
+    <rect x="655" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="1.5"/>
+    <text x="750" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node04</text>
+    <text x="750" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.54 · rack4</text>
+    <text x="750" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="750" y="456" text-anchor="middle" font-size="11" fill="#333">8 discos independentes</text>
+    <text x="750" y="470" text-anchor="middle" font-size="10" fill="#666">:8080</text>
+
+    <rect x="860" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="1.5"/>
+    <text x="955" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node05</text>
+    <text x="955" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.55 · rack5</text>
+    <text x="955" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="955" y="456" text-anchor="middle" font-size="11" fill="#333">8 discos independentes</text>
+    <text x="955" y="470" text-anchor="middle" font-size="10" fill="#666">:8080</text>
+
+    <rect x="1065" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="1.5"/>
+    <text x="1160" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node06</text>
+    <text x="1160" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.56 · rack6</text>
+    <text x="1160" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="1160" y="456" text-anchor="middle" font-size="11" fill="#333">8 discos independentes</text>
+    <text x="1160" y="470" text-anchor="middle" font-size="10" fill="#666">:8080</text>
+
+    <rect x="1270" y="392" width="190" height="86" rx="8" fill="#d9f2e3" stroke="#1e8449" stroke-width="1.5"/>
+    <text x="1365" y="412" text-anchor="middle" font-size="13" font-weight="bold" fill="#12522e">swfs-node07</text>
+    <text x="1365" y="427" text-anchor="middle" font-size="11" fill="#333">192.168.100.57 · rack7</text>
+    <text x="1365" y="442" text-anchor="middle" font-size="11" fill="#333">1x weed volume</text>
+    <text x="1365" y="456" text-anchor="middle" font-size="11" fill="#333">8 discos independentes</text>
+    <text x="1365" y="470" text-anchor="middle" font-size="10" fill="#666">:8080</text>
+  </g>
+
+  <!-- connector from node01 down to detail -->
+  <line x1="135" y1="478" x2="135" y2="500" stroke="#1e8449" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#arrowGreen)"/>
+
+  <!-- Detail callout: node01 disks -->
+  <rect x="45" y="500" width="565" height="405" rx="12" fill="#f3fbf6" stroke="#1e8449" stroke-width="1.5" stroke-dasharray="4,3"/>
+  <text x="65" y="524" font-size="13" font-weight="bold" fill="#12522e">Detalhe: swfs-node01 (mesmo padrão em node02..node07)</text>
+  <text x="65" y="540" font-size="11" fill="#555">8 discos = 8 devices virtio separados, cada um seu próprio filesystem ext4</text>
+
+  <!-- 8 disk boxes, 4x2 grid -->
+  <g font-size="10.5">
+    <!-- row1 -->
+    <rect x="60" y="555" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="120" y="572" text-anchor="middle" font-weight="bold" fill="#12522e">disk1</text>
+    <text x="120" y="586" text-anchor="middle" fill="#333">/dev/vdb</text>
+    <text x="120" y="600" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <rect x="195" y="555" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="255" y="572" text-anchor="middle" font-weight="bold" fill="#12522e">disk2</text>
+    <text x="255" y="586" text-anchor="middle" fill="#333">/dev/vdc</text>
+    <text x="255" y="600" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <rect x="330" y="555" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="390" y="572" text-anchor="middle" font-weight="bold" fill="#12522e">disk3</text>
+    <text x="390" y="586" text-anchor="middle" fill="#333">/dev/vdd</text>
+    <text x="390" y="600" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <rect x="465" y="555" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="525" y="572" text-anchor="middle" font-weight="bold" fill="#12522e">disk4</text>
+    <text x="525" y="586" text-anchor="middle" fill="#333">/dev/vde</text>
+    <text x="525" y="600" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <!-- row2 -->
+    <rect x="60" y="620" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="120" y="637" text-anchor="middle" font-weight="bold" fill="#12522e">disk5</text>
+    <text x="120" y="651" text-anchor="middle" fill="#333">/dev/vdf</text>
+    <text x="120" y="665" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <rect x="195" y="620" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="255" y="637" text-anchor="middle" font-weight="bold" fill="#12522e">disk6</text>
+    <text x="255" y="651" text-anchor="middle" fill="#333">/dev/vdg</text>
+    <text x="255" y="665" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <rect x="330" y="620" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="390" y="637" text-anchor="middle" font-weight="bold" fill="#12522e">disk7</text>
+    <text x="390" y="651" text-anchor="middle" fill="#333">/dev/vdh</text>
+    <text x="390" y="665" text-anchor="middle" fill="#666">9 GB · ext4</text>
+
+    <rect x="465" y="620" width="120" height="55" rx="6" fill="#eafaf1" stroke="#1e8449"/>
+    <text x="525" y="637" text-anchor="middle" font-weight="bold" fill="#12522e">disk8</text>
+    <text x="525" y="651" text-anchor="middle" fill="#333">/dev/vdi</text>
+    <text x="525" y="665" text-anchor="middle" fill="#666">9 GB · ext4</text>
+  </g>
+
+  <!-- converging arrows from disks to the single volume process -->
+  <g stroke="#1e8449" stroke-width="1.3" marker-end="url(#arrowGreen)">
+    <line x1="120" y1="675" x2="270" y2="725"/>
+    <line x1="255" y1="675" x2="290" y2="725"/>
+    <line x1="390" y1="675" x2="310" y2="725"/>
+    <line x1="525" y1="675" x2="330" y2="725"/>
+    <line x1="120" y1="610" x2="240" y2="725"/>
+    <line x1="255" y1="610" x2="270" y2="725"/>
+    <line x1="390" y1="610" x2="320" y2="725"/>
+    <line x1="525" y1="610" x2="350" y2="725"/>
+  </g>
+
+  <!-- single process box -->
+  <rect x="185" y="725" width="235" height="72" rx="10" fill="#c8ecd9" stroke="#117a4d" stroke-width="2.5"/>
+  <text x="302" y="746" text-anchor="middle" font-size="12" font-weight="bold" fill="#0d5c3a">weed volume (1 processo)</text>
+  <text x="302" y="761" text-anchor="middle" font-size="10.5" fill="#333">-dir=disk1,disk2,...,disk8</text>
+  <text x="302" y="775" text-anchor="middle" font-size="10.5" fill="#333">192.168.100.51:8080 · rack1</text>
+  <text x="302" y="789" text-anchor="middle" font-size="9.5" fill="#666">1 processo só -&gt; sem dado duplicado no dir</text>
+
+  <text x="65" y="825" font-size="11" font-weight="bold" fill="#12522e">Por que -dir com lista, e não 8 processos:</text>
+  <text x="65" y="842" font-size="10.5" fill="#444">cada disco é um device/filesystem próprio -&gt; `statfs` correto por disco,</text>
+  <text x="65" y="857" font-size="10.5" fill="#444">sem duplicar capacidade no dashboard (era o bug da seção 2.14 do HISTORICO.md).</text>
+  <text x="65" y="872" font-size="10.5" fill="#444">É o mesmo jeito nativo que o SeaweedFS usa em servidores multi-disco reais.</text>
+  <text x="65" y="893" font-size="10.5" fill="#666" font-style="italic">EC 5+2 (5 dados + 2 paridade = 7 shards) tem 1 shard por node -&gt; até 2 nodes</text>
+  <text x="65" y="908" font-size="10.5" fill="#666" font-style="italic">podem cair ao mesmo tempo e o dado ainda é reconstruível.</text>
+
+  <!-- Right panel: antes/depois do bug -->
+  <rect x="640" y="500" width="820" height="405" rx="12" fill="#fffaf5" stroke="#c0392b" stroke-width="1.2" stroke-dasharray="4,3"/>
+  <text x="660" y="524" font-size="13" font-weight="bold" fill="#8a2f22">Por que não eram 2 processos dividindo 1 disco (como antes)</text>
+
+  <!-- ANTES box -->
+  <text x="680" y="555" font-size="12" font-weight="bold" fill="#c0392b">ANTES (bug — capacidade contada em dobro)</text>
+  <rect x="680" y="570" width="330" height="185" rx="8" fill="#fdecea" stroke="#c0392b" stroke-width="1.2"/>
+
+  <rect x="710" y="590" width="270" height="46" rx="6" fill="#f9d7d2" stroke="#c0392b"/>
+  <text x="845" y="610" text-anchor="middle" font-size="11" fill="#7a2318">disco físico único (/dev/vdb, 70GB)</text>
+  <text x="845" y="625" text-anchor="middle" font-size="10" fill="#7a2318">1 filesystem só</text>
+
+  <rect x="720" y="655" width="115" height="40" rx="6" fill="#ffffff" stroke="#c0392b"/>
+  <text x="777" y="672" text-anchor="middle" font-size="10" fill="#7a2318">weed volume0</text>
+  <text x="777" y="685" text-anchor="middle" font-size="9.5" fill="#7a2318">:8080</text>
+
+  <rect x="855" y="655" width="115" height="40" rx="6" fill="#ffffff" stroke="#c0392b"/>
+  <text x="912" y="672" text-anchor="middle" font-size="10" fill="#7a2318">weed volume1</text>
+  <text x="912" y="685" text-anchor="middle" font-size="9.5" fill="#7a2318">:8081</text>
+
+  <line x1="777" y1="655" x2="800" y2="636" stroke="#c0392b" stroke-width="1.3" marker-end="url(#arrowRed)"/>
+  <line x1="912" y1="655" x2="890" y2="636" stroke="#c0392b" stroke-width="1.3" marker-end="url(#arrowRed)"/>
+
+  <text x="845" y="720" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#c0392b">statfs() igual pros 2 processos!</text>
+  <text x="845" y="736" text-anchor="middle" font-size="10.5" fill="#7a2318">dashboard soma os 2 -&gt; disco contado 2x</text>
+  <text x="845" y="751" text-anchor="middle" font-size="10.5" fill="#7a2318">14 processos x ~69,6GB &#8776; 975GB exibido</text>
+
+  <!-- DEPOIS box -->
+  <text x="1040" y="555" font-size="12" font-weight="bold" fill="#1e8449">DEPOIS (corrigido — usado neste lab hoje)</text>
+  <rect x="1040" y="570" width="400" height="185" rx="8" fill="#eafaf1" stroke="#1e8449" stroke-width="1.2"/>
+  <text x="1060" y="595" font-size="10.5" fill="#12522e">8 discos = 8 devices/filesystems separados</text>
+  <text x="1060" y="609" font-size="10.5" fill="#12522e">(ver detalhe completo à esquerda)</text>
+  <rect x="1075" y="625" width="290" height="42" rx="6" fill="#c8ecd9" stroke="#117a4d" stroke-width="1.5"/>
+  <text x="1220" y="642" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#0d5c3a">1x weed volume :8080</text>
+  <text x="1220" y="656" text-anchor="middle" font-size="9.5" fill="#0d5c3a">-dir=disk1,...,disk8</text>
+  <text x="1220" y="700" text-anchor="middle" font-size="10.5" font-weight="bold" fill="#1e8449">cada disco reporta seu statfs real</text>
+  <text x="1220" y="716" text-anchor="middle" font-size="10.5" fill="#12522e">7 nodes x 8 x 9GB = 504GB reais no total</text>
+  <text x="1220" y="732" text-anchor="middle" font-size="10.5" fill="#12522e">dashboard passa a bater com o disco físico</text>
+
+  <text x="660" y="790" font-size="10.5" fill="#555">Real da empresa: 8 servidores (1 desligado), 8 discos de ~20TB cada — em RAID0,</text>
+  <text x="660" y="805" font-size="10.5" fill="#555">cai pra ~18TB usável por disco depois de formatado. Este lab reproduz a</text>
+  <text x="660" y="820" font-size="10.5" fill="#555">MESMA estrutura (8 discos independentes/servidor) em escala reduzida (9GB/disco).</text>
+
+  <!-- legend -->
+  <text x="660" y="855" font-size="11" font-weight="bold" fill="#333">Legenda</text>
+  <rect x="660" y="864" width="14" height="14" fill="#dbe9ff" stroke="#3366cc"/><text x="680" y="875" font-size="10.5" fill="#333">master (raft) + filer</text>
+  <rect x="820" y="864" width="14" height="14" fill="#f3e0ff" stroke="#8a2be2"/><text x="840" y="875" font-size="10.5" fill="#333">S3 gateway</text>
+  <rect x="940" y="864" width="14" height="14" fill="#ffe9cc" stroke="#e08a00"/><text x="960" y="875" font-size="10.5" fill="#333">PostgreSQL</text>
+  <rect x="1060" y="864" width="14" height="14" fill="#d9f2e3" stroke="#1e8449"/><text x="1080" y="875" font-size="10.5" fill="#333">volume node (7x, 8 discos cada)</text>
+
+  <text x="750" y="960" text-anchor="middle" font-size="10.5" fill="#888">Gerado a partir do 00-config.env vigente (VOLUME_DISKS_PER_NODE=8) — ver README.md e HISTORICO.md (seção 2.14) para o histórico completo.</text>
+</svg>

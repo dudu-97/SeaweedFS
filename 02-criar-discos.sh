@@ -33,16 +33,23 @@ for vm in "${VM_NAMES[@]}"; do
         qemu-img create -f qcow2 -F qcow2 -b "$BASE_IMAGE_PATH" "$OS_DISK" "$OS_SIZE"
     fi
 
-    # Nem toda VM tem 2º disco (só os volume nodes, via VM_DATA_DISK_SIZE)
+    # Nem toda VM tem discos de dados (só os volume nodes, via
+    # VM_DATA_DISK_SIZE) -- e quando tem, são VOLUME_DISKS_PER_NODE
+    # discos INDEPENDENTES (arquivos qcow2 separados = devices virtio
+    # separados dentro da VM), não 1 disco só. É isso que garante que
+    # cada "disco" tenha seu próprio filesystem/statfs de verdade --
+    # ver nota no 00-config.env.
     DATA_SIZE="${VM_DATA_DISK_SIZE[$vm]:-}"
     if [[ -n "$DATA_SIZE" ]]; then
-        DATA_DISK="$VM_DIR/${vm}-data.qcow2"
-        if [[ -f "$DATA_DISK" ]]; then
-            warn "$vm: disco de dados já existe ($DATA_DISK), pulando."
-        else
-            log "$vm: criando disco de dados (${DATA_SIZE}, cru, para o SeaweedFS)"
-            qemu-img create -f qcow2 "$DATA_DISK" "$DATA_SIZE"
-        fi
+        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
+            DATA_DISK="$VM_DIR/${vm}-data${d}.qcow2"
+            if [[ -f "$DATA_DISK" ]]; then
+                warn "$vm: disco de dados $d já existe ($DATA_DISK), pulando."
+            else
+                log "$vm: criando disco de dados $d/${VOLUME_DISKS_PER_NODE} (${DATA_SIZE}, cru, para o SeaweedFS)"
+                qemu-img create -f qcow2 "$DATA_DISK" "$DATA_SIZE"
+            fi
+        done
     fi
 done
 

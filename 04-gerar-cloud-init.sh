@@ -732,20 +732,33 @@ for vm in "${VM_NAMES[@]}"; do
     EXTRA_PACKAGES=""
     $IS_PGSQL && EXTRA_PACKAGES="  - postgresql"
 
-    # 2º disco (/dev/vdb) só existe nos volume nodes -- as demais VMs não
+    # Discos de dados (só existem nos volume nodes -- as demais VMs não
     # têm VM_DATA_DISK_SIZE preenchido em 00-config.env, então não têm
-    # esse disco anexado (ver 02-criar-discos.sh e 05-criar-vms.sh).
+    # nada anexado, ver 02-criar-discos.sh e 05-criar-vms.sh). São
+    # VOLUME_DISKS_PER_NODE discos INDEPENDENTES (/dev/vdb, /dev/vdc,
+    # ...), cada um formatado e montado no seu próprio ponto
+    # (${DATA_MOUNT_DIR}/disk1, /disk2, ...) -- de propósito, para que
+    # cada disco tenha seu próprio filesystem e `statfs` correto (ver
+    # nota no 00-config.env sobre o bug de capacidade em dobro que isso
+    # evita, comparado a 2 processos dividindo 1 disco só).
     DATA_DISK_RUNCMD=""
     if $IS_VOLUME; then
         DATA_DISK_RUNCMD="
-  # --- disco de dados: formata (1x), monta em ${DATA_MOUNT_DIR} e dá o
-  # dono certo ao ${VM_USER} -- sem isso, \"weed volume\" falha com
+  # --- discos de dados: ${VOLUME_DISKS_PER_NODE} devices independentes,
+  # cada um formatado (1x) e montado em ${DATA_MOUNT_DIR}/diskN, dono
+  # certo pro ${VM_USER} -- sem isso, \"weed volume\" falha com
   # \"permission denied\" ao criar suas pastas de estado.
-  - [ bash, -c, \"blkid ${DATA_DISK_DEVICE} >/dev/null 2>&1 || mkfs.ext4 -F -L swfs-data ${DATA_DISK_DEVICE}\" ]
-  - mkdir -p ${DATA_MOUNT_DIR}
-  - [ bash, -c, \"grep -q '^LABEL=swfs-data' /etc/fstab || echo 'LABEL=swfs-data ${DATA_MOUNT_DIR} ext4 defaults 0 2' >> /etc/fstab\" ]
+  - mkdir -p ${DATA_MOUNT_DIR}"
+        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
+            DEV="${DATA_DISK_DEVICES[$((d - 1))]}"
+            DATA_DISK_RUNCMD+="
+  - [ bash, -c, \"blkid ${DEV} >/dev/null 2>&1 || mkfs.ext4 -F -L swfs-disk${d} ${DEV}\" ]
+  - mkdir -p ${DATA_MOUNT_DIR}/disk${d}
+  - [ bash, -c, \"grep -q '^LABEL=swfs-disk${d}' /etc/fstab || echo 'LABEL=swfs-disk${d} ${DATA_MOUNT_DIR}/disk${d} ext4 defaults 0 2' >> /etc/fstab\" ]"
+        done
+        DATA_DISK_RUNCMD+="
   - mount -a
-  - chown ${VM_USER}:${VM_USER} ${DATA_MOUNT_DIR}"
+  - chown -R ${VM_USER}:${VM_USER} ${DATA_MOUNT_DIR}"
     fi
 
     # --- unidades systemd + runcmd do(s) papel(is) desta VM -----------
@@ -817,34 +830,38 @@ for vm in "${VM_NAMES[@]}"; do
     fi
 
     if $IS_VOLUME; then
-        for ((i = 0; i < VOLUME_PROCS_PER_NODE; i++)); do
-            VPORT=$((SEAWEED_VOLUME_BASE_PORT + i))
-            WEED_UNITS+="
-  - path: /etc/systemd/system/weed-volume${i}.service
+        # 1 processo `weed volume` por node, dono de VOLUME_DISKS_PER_NODE
+        # discos independentes -- passados como lista separada por vírgula
+        # em -dir (é assim que o SeaweedFS lida nativamente com um
+        # servidor multi-disco; cada disco reporta seu próprio statfs
+        # certinho, sem o double-counting que 2 processos no mesmo disco
+        # causavam -- ver HISTORICO.md e a nota no 00-config.env).
+        VOLUME_DIRS=""
+        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
+            VOLUME_DIRS+="${DATA_MOUNT_DIR}/disk${d},"
+        done
+        VOLUME_DIRS="${VOLUME_DIRS%,}"   # tira a vírgula final
+
+        WEED_UNITS+="
+  - path: /etc/systemd/system/weed-volume.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=SeaweedFS Volume Server ${i} (disco simulado ${i} de ${VOLUME_PROCS_PER_NODE})
+      Description=SeaweedFS Volume Server (${VOLUME_DISKS_PER_NODE} discos independentes)
       After=network-online.target
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed volume -dir=${DATA_MOUNT_DIR}/volume${i} -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${VPORT}
+      ExecStart=/usr/local/bin/weed volume -dir=${VOLUME_DIRS} -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${SEAWEED_VOLUME_BASE_PORT}
       Restart=on-failure
       RestartSec=5
 
       [Install]
       WantedBy=multi-user.target
 "
-            WEED_RUNCMD+="
-  - mkdir -p ${DATA_MOUNT_DIR}/volume${i}"
-        done
         WEED_RUNCMD+="
-  - systemctl daemon-reload"
-        for ((i = 0; i < VOLUME_PROCS_PER_NODE; i++)); do
-            WEED_RUNCMD+="
-  - /usr/local/bin/svc-enable-now.sh weed-volume${i}.service"
-        done
+  - systemctl daemon-reload
+  - /usr/local/bin/svc-enable-now.sh weed-volume.service"
     fi
 
     if $IS_S3FRONT; then

@@ -47,6 +47,32 @@ Physical disk usage in all 3 runs matched `bucket_physical_size_bytes` almost ex
 
 Data integrity was verified after EC in run 3 (MD5 identical before/after, read back via the master-resolved file id).
 
+## Run 4 — ruling out a topology-count coincidence
+
+After runs 1-3, a reasonable alternate hypothesis came up: what if 14 isn't hardcoded, but happens to match some property of *that* cluster (e.g. total volume-server process count)? At the time of runs 1-3 the cluster had 14 `weed volume` **processes** spread across 7 racks (2 processes/rack, sharing 1 disk each — an artifact of the lab, not of SeaweedFS).
+
+We since rebuilt the same cluster with **1 `weed volume` process per rack, each process owning 8 independent disks** (so now genuinely 7 volume-server processes, 7 racks, not 14 of anything). Re-ran the identical manual `ec.encode` reproduction on this new topology:
+
+```
+mount 5.[0 1 2 3 4 5 6 7 8 9 10 11 12 13]
+```
+
+Still exactly **14 shards** (`.ec00`-`.ec13`) — unchanged despite the process/rack count changing from 14 to 7. This rules out any dependency on the number of available volume servers or racks: 10+4 is emitted regardless of cluster size. With only 7 real placement targets for 14 shards, the placement logic just doubled/tripled up on some of them:
+
+| Node | Shards | Count |
+|---|---|---|
+| .51 | 0, 6, 10 | 3 |
+| .52 | 8, 9, 13 | 3 |
+| .53 | 1, 7, 11 | 3 |
+| .54 | 2, 12 | 2 |
+| .55 | 3 | 1 |
+| .56 | 4 | 1 |
+| .57 | 5 | 1 |
+
+## Working theory
+
+Given the automatic maintenance-scanner path (`detection.go`, see our separate report `RELATO-EC-AUTO-STUCK-DEV.md`) *does* correctly read `ec.config` and plan `dataShards+parityShards` destinations, while the manual `weed shell ec.encode` command does not (confirmed across 4 runs, 2 different cluster topologies), our best guess is that this build has **two independent EC-encoding code paths**: a newer one wired to the configurable ratio (used by the automatic scanner), and an older/legacy one still hardcoded to the classic OSS 10+4 split (used by the manual shell command). Not a topology artifact — a real inconsistency between two code paths in the same binary.
+
 > A pergunta enviada ao dev (texto exato) não fica duplicada aqui — foi
 > mandada diretamente fora do repositório. O essencial pra reproduzir o
 > achado já está documentado acima (ambiente, passos, evidência).

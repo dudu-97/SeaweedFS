@@ -123,12 +123,19 @@ de racks.
 
 ---
 
-# Parte 2 — Rebuild Enterprise 5+2 (topologia atual, 13 VMs)
+# Parte 2 — Rebuild Enterprise 5+2 (13 VMs)
 
-A partir daqui, topologia = a descrita no `README.md` atual: 3
-masters+filer (um deles com admin+worker), `swfs-s3front1` (S3 gateway
-standalone), `swfs-pgsql01` (metadata store dos filers), 7 volume nodes ×
-2 processos = 14 volume servers, 1 rack cada, EC 5+2.
+A partir daqui, topologia: 3 masters+filer (um deles com admin+worker),
+`swfs-s3front1` (S3 gateway standalone), `swfs-pgsql01` (metadata store
+dos filers), 7 volume nodes, EC 5+2. **Nota**: os achados abaixo (até a
+seção 2.12) foram feitos quando cada volume node ainda rodava **2
+processos `weed volume` dividindo 1 disco só** (14 "volume servers" no
+total) — é essa topologia que causou o bug de capacidade em dobro achado
+na seção 2.14. A partir da seção 2.14, o lab passou a usar **1 processo
+por node com 8 discos independentes** (ver `README.md` atual) — os
+achados anteriores continuam válidos (foram sobre o SeaweedFS em si, não
+sobre a contagem de disco), só a contagem exata de "volume servers"
+mudou de 14 processos para 7.
 
 ## 2.1 Binário Enterprise: de onde vem, o que muda
 
@@ -217,6 +224,22 @@ mostra, mas **não** o que `weed shell ec.encode` manual grava fisicamente
 `-dataShards`/`-parityShards` no `ec.encode` (só no `ec.config`).
 Integridade dos dados confirmada por MD5 idêntico antes/depois em todos os
 runs.
+
+**Run 4, feito bem depois (topologia trocada de 14 processos/7 racks para
+7 processos/7 racks — seção 2.14) — descarta de vez a hipótese de que o
+14 tivesse a ver com a contagem de servidores/racks disponíveis.**
+Repetimos o `ec.encode` idêntico no cluster reconstruído (1 processo por
+rack, dono de 8 discos, ou seja, agora **de verdade** só 7 volume
+servers): resultado, os mesmos **14 shards** de sempre
+(`mount 5.[0 1 2 3 4 5 6 7 8 9 10 11 12 13]`), sem mudar nada. Com só 7
+alvos reais pra 14 shards, o algoritmo de colocação dobrou/triplicou em
+alguns nós (`.51`, `.52`, `.53` ficaram com 3 shards cada; `.54` com 2;
+`.55`/`.56`/`.57` com 1). Conclusão: o 10+4 é fixo, não depende do
+tamanho do cluster — reforça a teoria de que o `ec.encode` manual chama
+um caminho de código diferente (mais antigo, nunca atualizado pra ler
+`ec.config`) do que o scanner automático, que lê certinho (seção 2.12).
+Texto completo dessa 4ª rodada já incorporado em
+`RELATO-EC-RATIO-DEV.md`.
 
 ## 2.8 EC não é a "primeira linha de defesa" — replicação é
 
@@ -339,6 +362,22 @@ servers (`weed-volume` parado, `.dat`/`.idx`/`.vif` apagados, serviço
 religado — o processo solta os arquivos e reporta ao master que não tem
 volume nenhum). Confirmado via `/dir/status`: `Max: 16, Free: 16,
 Volumes: 0` nos dois racks, igual ao estado logo após o deploy.
+
+## 2.14 Dashboard mostrando ~2x a capacidade real — e a correção definitiva
+
+Pergunta direta do usuário: por que o dashboard admin (`/cluster/volume-servers`, `/storage/tiering`) mostrava um total de **956,9GB**, quando a capacidade física real do cluster era só **490GB** (7 nodes × 70GB)?
+
+**Investigação**: comparei o `/status` (campo `DiskStatuses`) dos 2 processos `weed volume` do mesmo node (`swfs-node01`, portas 8080/8081) — **valores byte-a-byte idênticos** (`used`/`free`/`percent_free` iguais). Motivo: `/data/volume0` e `/data/volume1` eram só duas subpastas do **mesmo disco** (`/dev/vdb`, confirmado via `df`/`findmnt`/`lsblk`) — `statfs()` (a syscall por trás do `df` e do relatório de disco do `weed volume`) mede o **filesystem inteiro**, não a pasta específica. Cada processo reportava o disco físico inteiro como se fosse só dele; o dashboard, ao somar a capacidade de todos os "volume servers" registrados, não deduplicava por device — resultado: cada disco físico contado 2x (`14 processos × ~69,6GB ≈ 975GB`, bem perto dos 956,9GB mostrados).
+
+**Veredito**: não é um bug clássico do SeaweedFS (o `statfs` por processo está correto — é o comportamento padrão de qualquer ferramenta baseada nele, `df` inclusive). É uma consequência direta da topologia do lab: 2 processos `weed volume` **compartilhando 1 disco físico só**, artifício usado pra simular "2 discos por node" com metade do hardware. Em produção (1 processo por servidor, cada disco um device de verdade) isso nunca aconteceria.
+
+**Correção aplicada** (a pedido do usuário, pra aproximar da topologia real da empresa: 8 servidores, 1 desligado, 7 ativos, 8 discos de verdade cada):
+- `00-config.env`: `VOLUME_DISKS_PER_NODE=8` discos **independentes** por volume node (arquivos `.qcow2` separados = devices virtio separados, não partições de 1 disco), 9GB cada (504GB brutos no total — escala de lab, mantendo a lógica dos 8 discos reais da empresa sem tentar replicar os 20TB/disco literais).
+- `02-criar-discos.sh` / `05-criar-vms.sh`: criam e anexam os 8 discos (`-data1.qcow2` .. `-data8.qcow2`) como devices separados (`/dev/vdb` .. `/dev/vdi`).
+- `04-gerar-cloud-init.sh`: cada device formatado e montado em `/data/disk1` .. `/data/disk8` (8 filesystems reais, não 8 pastas de 1 filesystem); **1 processo `weed volume` por node** (não mais 2), usando `-dir=/data/disk1,/data/disk2,...,/data/disk8` — é o jeito nativo do SeaweedFS de gerenciar um servidor multi-disco, e resolve o double-counting na raiz (cada disco vira um `statfs` próprio).
+- `06-status.sh`: checagem de disco/serviço ajustada pra 1 processo + N mountpoints.
+
+Efeito colateral bom, não só cosmético: antes, os 2 processos de um mesmo node apareciam pro Master como 2 "DataNodes" diferentes na mesma rack — o que pode ter contribuído pro achado da seção 2.11 (shards EC se concentrando "no mesmo servidor" sem que isso fosse óbvio, já que pareciam ser 2 servidores distintos). Com 1 processo por node, a topologia que o Master enxerga bate exatamente com a física: 1 rack = 1 servidor de verdade.
 
 ---
 
@@ -464,6 +503,32 @@ Global Default EC Ratio: 5+2
 Physical disk usage in all 3 runs matched `bucket_physical_size_bytes` almost exactly (confirmed via `du`/direct file listing on every volume node), so this isn't a metrics-reporting bug — the encoder itself is writing 14 real shard files.
 
 Data integrity was verified after EC in run 3 (MD5 identical before/after, read back via the master-resolved file id).
+
+### Run 4 — ruling out a topology-count coincidence
+
+After runs 1-3, a reasonable alternate hypothesis came up: what if 14 isn't hardcoded, but happens to match some property of *that* cluster (e.g. total volume-server process count)? At the time of runs 1-3 the cluster had 14 `weed volume` **processes** spread across 7 racks (2 processes/rack, sharing 1 disk each — an artifact of the lab, not of SeaweedFS).
+
+We since rebuilt the same cluster with **1 `weed volume` process per rack, each process owning 8 independent disks** (so now genuinely 7 volume-server processes, 7 racks, not 14 of anything). Re-ran the identical manual `ec.encode` reproduction on this new topology:
+
+```
+mount 5.[0 1 2 3 4 5 6 7 8 9 10 11 12 13]
+```
+
+Still exactly **14 shards** (`.ec00`-`.ec13`) — unchanged despite the process/rack count changing from 14 to 7. This rules out any dependency on the number of available volume servers or racks: 10+4 is emitted regardless of cluster size. With only 7 real placement targets for 14 shards, the placement logic just doubled/tripled up on some of them:
+
+| Node | Shards | Count |
+|---|---|---|
+| .51 | 0, 6, 10 | 3 |
+| .52 | 8, 9, 13 | 3 |
+| .53 | 1, 7, 11 | 3 |
+| .54 | 2, 12 | 2 |
+| .55 | 3 | 1 |
+| .56 | 4 | 1 |
+| .57 | 5 | 1 |
+
+### Working theory
+
+Given the automatic maintenance-scanner path (`detection.go`, see Relato 2 below) *does* correctly read `ec.config` and plan `dataShards+parityShards` destinations, while the manual `weed shell ec.encode` command does not (confirmed across 4 runs, 2 different cluster topologies), our best guess is that this build has **two independent EC-encoding code paths**: a newer one wired to the configurable ratio (used by the automatic scanner), and an older/legacy one still hardcoded to the classic OSS 10+4 split (used by the manual shell command). Not a topology artifact — a real inconsistency between two code paths in the same binary.
 
 ## Relato 2 — automatic EC maintenance task is correctly planned (respects configured ratio) but never executed
 

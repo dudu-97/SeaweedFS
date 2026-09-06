@@ -71,12 +71,17 @@ for vm in "${VM_NAMES[@]}"; do
         [[ -f "$f" ]] || die "$f não encontrado. Rode antes: ./02-criar-discos.sh e ./04-gerar-cloud-init.sh"
     done
 
-    # Nem toda VM tem 2º disco (só os volume nodes, ver VM_DATA_DISK_SIZE)
+    # Nem toda VM tem discos de dados (só os volume nodes, ver
+    # VM_DATA_DISK_SIZE) -- quando tem, são VOLUME_DISKS_PER_NODE discos
+    # INDEPENDENTES anexados em ordem (viram /dev/vdb, /dev/vdc, ... na
+    # VM, um device por disco -- ver DATA_DISK_DEVICES no 00-config.env).
     DISK_ARGS=(--disk path="$OS_DISK",format=qcow2,bus=virtio)
     if [[ -n "${VM_DATA_DISK_SIZE[$vm]:-}" ]]; then
-        DATA_DISK="$VM_DIR/${vm}-data.qcow2"
-        [[ -f "$DATA_DISK" ]] || die "$DATA_DISK não encontrado. Rode antes: ./02-criar-discos.sh"
-        DISK_ARGS+=(--disk path="$DATA_DISK",format=qcow2,bus=virtio)
+        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
+            DATA_DISK="$VM_DIR/${vm}-data${d}.qcow2"
+            [[ -f "$DATA_DISK" ]] || die "$DATA_DISK não encontrado. Rode antes: ./02-criar-discos.sh"
+            DISK_ARGS+=(--disk path="$DATA_DISK",format=qcow2,bus=virtio)
+        done
     fi
 
     log "Criando VM: $vm [${VM_ROLE[$vm]}] (IP ${VM_IP[$vm]}, MAC ${VM_MAC[$vm]})"
