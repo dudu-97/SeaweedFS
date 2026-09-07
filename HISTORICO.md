@@ -530,6 +530,10 @@ Still exactly **14 shards** (`.ec00`-`.ec13`) — unchanged despite the process/
 
 Given the automatic maintenance-scanner path (`detection.go`, see Relato 2 below) *does* correctly read `ec.config` and plan `dataShards+parityShards` destinations, while the manual `weed shell ec.encode` command does not (confirmed across 4 runs, 2 different cluster topologies), our best guess is that this build has **two independent EC-encoding code paths**: a newer one wired to the configurable ratio (used by the automatic scanner), and an older/legacy one still hardcoded to the classic OSS 10+4 split (used by the manual shell command). Not a topology artifact — a real inconsistency between two code paths in the same binary.
 
+### Bonus: the Admin UI surfaces the same inconsistency, and mislabels shards on top of it
+
+The `weed admin` dashboard's volume detail page for a volume produced by this bug shows the mismatch plainly: **EC Config: `5 data, 2 parity`** (read straight from `ec.config`, not from disk), **Status: `Complete (14/7 shards)`** (the UI's own text admits it expected 7 and found 14), and shard badges **`D00`-`D04`** (blue, "Data") + **`P05`-`P13`** (yellow, "Parity") — coloring the first `dataShards` (5) as data and the rest as parity, even though shards `05`-`09` are real data shards in the actual 10+4 layout on disk. Same root cause, now visible at a glance in the dashboard: any volume showing `N/7` with N>7, or 14 shard badges instead of 7, has the classic 10+4 layout regardless of what `EC Config` says.
+
 ## Relato 2 — automatic EC maintenance task is correctly planned (respects configured ratio) but never executed
 
 ### Environment

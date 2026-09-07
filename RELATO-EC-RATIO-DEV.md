@@ -73,6 +73,16 @@ Still exactly **14 shards** (`.ec00`-`.ec13`) — unchanged despite the process/
 
 Given the automatic maintenance-scanner path (`detection.go`, see our separate report `RELATO-EC-AUTO-STUCK-DEV.md`) *does* correctly read `ec.config` and plan `dataShards+parityShards` destinations, while the manual `weed shell ec.encode` command does not (confirmed across 4 runs, 2 different cluster topologies), our best guess is that this build has **two independent EC-encoding code paths**: a newer one wired to the configurable ratio (used by the automatic scanner), and an older/legacy one still hardcoded to the classic OSS 10+4 split (used by the manual shell command). Not a topology artifact — a real inconsistency between two code paths in the same binary.
 
+## Bonus: the Admin UI surfaces the same inconsistency, and mislabels shards on top of it
+
+The `weed admin` dashboard's volume detail page (Volume Information / Shard Distribution panels) for a volume produced by this bug shows the mismatch plainly:
+
+- **EC Config: `5 data, 2 parity`** — the panel reads this straight from the cluster's `ec.config` (5+2), not from what's actually on disk.
+- **Status: `Complete (14/7 shards)`** — the UI's own text admits the discrepancy: it expected 7 (per `ec.config`) and found 14 on disk, and still reports the volume as "Complete" since 14 ≥ 7.
+- **Shard badges: `D00`-`D04` (blue, "Data") + `P05`-`P13` (yellow, "Parity")** — the UI colors the first `dataShards` (5, from `ec.config`) shards as data and everything else as parity. Since the volume actually holds the classic 10+4 layout, shards `05`-`09` are **real data shards**, not parity — the UI's labeling logic trusts the configured ratio instead of the shard contents.
+
+This isn't a new bug — it's the same root cause (`ec.encode` ignoring `ec.config`) becoming visible in the dashboard, and it's a handy way to spot an affected volume at a glance: any volume showing `N/7` (N > 7) in its Status badge, or 14 shard badges instead of 7, has the classic 10+4 layout regardless of what `EC Config` says above it.
+
 > A pergunta enviada ao dev (texto exato) não fica duplicada aqui — foi
 > mandada diretamente fora do repositório. O essencial pra reproduzir o
 > achado já está documentado acima (ambiente, passos, evidência).

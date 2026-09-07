@@ -109,13 +109,66 @@ sobreviventes. A perda extra foi sempre entre as não-correntes (sobrou
    pra a maioria dos casos, mas relevante se a garantia de retenção for
    parte do contrato/SLA vendido.
 
+## Rodada extra — isolando a variável "quantos buckets na mesma passada"
+
+Pergunta direta: o problema é do motor de lifecycle em geral, ou só
+aparece quando **vários buckets são processados juntos**? Duas fases
+novas, pra comparar:
+
+### Fase A — 5 lotes de 5 buckets (25 buckets)
+
+Mesmo procedimento, só que 5 buckets por lote em vez de 3.
+
+| Lote | Buckets (versões restantes) | Anomalias |
+|---|---|---|
+| A | 3,2,3,2,3 | 2/5 |
+| B | 3,3,3,3,3 | 0/5 |
+| C | 2,2,2,3,2 | 4/5 |
+| D | 3,2,3,3,2 | 2/5 |
+| E | 3,3,3,3,3 | 0/5 |
+| **Total** | **25 buckets** | **8/25 (32%)** |
+
+Taxa praticamente idêntica à dos lotes de 3 (33%) — o tamanho do lote
+não muda a taxa de forma proporcional, é sempre por volta de 1/3.
+
+### Fase B — 5 buckets testados 1 de cada vez (isolado)
+
+Antes desta fase, **apaguei os 41 buckets de teste anteriores**
+(`s3.bucket.delete`), porque senão o comando ainda processaria todos
+eles juntos mesmo criando "só 1 bucket novo" — o `run-shard` sempre
+processa todo mundo que tem regra de lifecycle configurada, não dá pra
+filtrar por bucket (mesmo achado do POC IV). Cada rodada abaixo criou 1
+bucket, rodou o lifecycle sozinho, conferiu o resultado, e apagou o
+bucket antes da próxima — confirmando a cada vez, pelo log
+(`loaded lifecycle for 1 bucket(s)`), que era realmente só 1 bucket na
+passada.
+
+| Rodada | Bucket | `loaded lifecycle for` | Resultado |
+|---|---|---|---|
+| 1 | poc5-solo-1 | 1 bucket(s) | 3 — OK |
+| 2 | poc5-solo-2 | 1 bucket(s) | 3 — OK |
+| 3 | poc5-solo-3 | 1 bucket(s) | 3 — OK |
+| 4 | poc5-solo-4 | 1 bucket(s) | 3 — OK |
+| 5 | poc5-solo-5 | 1 bucket(s) | 3 — OK |
+| **Total** | | | **5/5 (100% corretos, 0 anomalias)** |
+
+### Conclusão desta rodada extra
+
+**Isolado a 1 bucket por vez: zero falhas em 5 tentativas. Misturado
+com outros buckets na mesma passada (lotes de 3 ou de 5): ~32-33% de
+falha, em 40 buckets testados no total.** Isso fecha a causa com bem
+mais confiança: **o defeito só se manifesta quando o motor de lifecycle
+processa múltiplos buckets na mesma execução** — bate exatamente com a
+hipótese de condição de corrida entre goroutines concorrentes por
+shard (achada via símbolos do binário, seção abaixo), já que com 1
+bucket só não existe concorrência nenhuma disputando o mesmo estado
+compartilhado.
+
 ## Próximo passo
 
-Taxa de 33% em 15 tentativas já é evidência sólida o bastante pra virar
-um relato formal pro dev, nos mesmos moldes de
-`RELATO-EC-RATIO-DEV.md`/`RELATO-EC-AUTO-STUCK-DEV.md` — falta só
-decidir se vale reproduzir mais uma vez com um bucket só (mais fácil de
-isolar causa) antes de escrever, ou já registrar como está.
+Com 40 buckets em lotes múltiplos (32,5% de falha) contra 5 buckets
+isolados (0% de falha), a evidência já é forte o bastante pra enviar o
+relato formal como está — atualizado abaixo com essa rodada extra.
 
 ---
 
@@ -137,7 +190,9 @@ isolar causa) antes de escrever, ou já registrar como está.
 
 `NoncurrentVersionExpiration` with only `NewerNoncurrentVersions` set (no `NoncurrentDays`) is supposed to retain exactly the N newest noncurrent versions of every object and expire the rest on the next lifecycle pass. When a **single lifecycle invocation processes multiple buckets that each have their own copy of this rule**, some buckets intermittently end up with **one fewer noncurrent version than configured** — i.e. the rule over-deletes by exactly one version. The *current* version is never affected; only noncurrent-version retention undercounts.
 
-Observed rate: **5 out of 15 buckets (33%)** across 5 independent batches (3 fresh buckets + 1 lifecycle invocation per batch). The same setup, run back-to-back with no other change, produced 2/3 failing buckets in one batch and 0/3 in the very next — ruling out a simple, deterministic off-by-one and pointing at a timing/ordering-dependent (likely concurrency) issue rather than a pure logic bug.
+Observed rate: **13 out of 40 buckets (32.5%)** across batched runs (5 batches of 3 + 5 batches of 5, one lifecycle invocation per batch). The same setup, run back-to-back with no other change, produced anywhere from 0/3 to 4/5 failing buckets from one batch to the next — ruling out a simple, deterministic off-by-one and pointing at a timing/ordering-dependent (likely concurrency) issue rather than a pure logic bug.
+
+**Isolation control**: when the exact same steps are run with **only one bucket present** in the entire cluster (no other bucket carrying a lifecycle rule, confirmed via the tool's own `loaded lifecycle for 1 bucket(s)` log line), the failure **never occurred — 0 out of 5 independent single-bucket runs**, versus 32.5% across 40 buckets processed in multi-bucket batches. This strongly suggests the defect is specifically triggered by **concurrent processing of multiple buckets in the same pass**, not by the `NewerNoncurrentVersions` logic in isolation.
 
 ### Steps to reproduce
 
@@ -174,6 +229,13 @@ PUT /<bucket>?lifecycle
 GET /<bucket>/<key>.versions/   (Filer namespace listing)
 ```
 
+For the isolation control, delete every other bucket first
+(`s3.bucket.delete -name=<bucket>`) so the cluster has exactly one
+bucket with a lifecycle rule, confirm the `run-shard` log line reads
+`loaded lifecycle for 1 bucket(s)`, then repeat steps 1-5 with a single
+bucket per trial (delete it before starting the next trial, to keep
+each one isolated).
+
 ### Results (5 independent batches, 15 buckets)
 
 | Batch | Buckets (versions remaining) | Expected each | Failures |
@@ -186,6 +248,16 @@ GET /<bucket>/<key>.versions/   (Filer namespace listing)
 | **Total** | **15 buckets** | | **5/15 (33%)** |
 
 No positional pattern within a batch — the failing bucket was 1st, 2nd, and 3rd in different batches, not consistently the first or last one processed. In every failing case, verified via the `.versions` directory's `Seaweed-X-Amz-Latest-Version-Id` extended attribute that the **current** version was untouched; the deficit was always among noncurrent versions (1 kept instead of 2).
+
+### Results — batch size and isolation control
+
+| Configuration | Buckets tested | Failures | Rate |
+|---|---|---|---|
+| 5 batches × 3 buckets, 1 pass per batch | 15 | 5 | 33% |
+| 5 batches × 5 buckets, 1 pass per batch | 25 | 8 | 32% |
+| **5 batches × 1 bucket, 1 pass per batch (isolated — verified via `loaded lifecycle for 1 bucket(s)`)** | **5** | **0** | **0%** |
+
+Batch size (3 vs 5) doesn't change the rate — it stays close to 1/3 either way. The only variable that eliminated the failure entirely was reducing the pass to a single bucket. Before the isolation runs, every bucket from the earlier batches was deleted (`s3.bucket.delete`) so each isolated run's `run-shard` invocation genuinely had only one bucket with a lifecycle rule to process — otherwise the tool still evaluates every bucket that has a rule configured, regardless of which bucket was just created (there is no per-bucket flag on `s3.lifecycle.run-shard`).
 
 ### Suspected root cause (inferred from binary symbols, not from source review)
 
@@ -210,8 +282,12 @@ Two things stand out:
 
 **Hypothesis**: when a bucket's noncurrent versions are split across 2+ shards, the concurrent per-shard goroutines each need to consult/update the shared `PriorState` for that bucket's `ActionKey` to correctly enforce a *global* "keep N newest" count. If that shared state isn't fully synchronized against concurrent access from sibling shard-goroutines, the count of "already-kept newer versions" seen by one goroutine can be stale or double-counted, causing a version that should survive to be misclassified as excess and deleted. This would explain why the failure is intermittent and not tied to bucket position — it depends on shard assignment and goroutine scheduling timing on each run, not on the rule or the data itself.
 
-This is inference from symbol names and struct shapes, **not** a confirmed code-level diagnosis — we don't have the actual source to point at a specific line. Flagging it as a strong lead for whoever investigates on your end.
+The isolation control (0/5 failures with a single bucket vs. 13/40 with multiple buckets in the same pass) is consistent with this: with only one bucket in play, there's no sibling bucket/shard activity to race against, even though the same `sync.WaitGroup`/16-shard fan-out presumably still runs.
+
+This is inference from symbol names, struct shapes, and the isolation experiment — **not** a confirmed code-level diagnosis, since we don't have the actual source to point at a specific line. Flagging it as a strong lead for whoever investigates on your end.
 
 ### Impact
 
 A customer relying on "always keep my N most recent versions" as a data-retention guarantee (e.g. compliance, quota planning, rollback expectations) can silently end up with N-1 in about 1 out of 3 lifecycle passes that happen to process their bucket alongside others. The current/live object is never at risk — only historical version depth is affected, and only when versions are pruned via lifecycle across a multi-bucket pass.
+
+Since real deployments virtually always have more than one bucket with a lifecycle rule (and `s3.lifecycle.run-shard`/the daily scheduled run always process every configured bucket together, with no per-bucket invocation available), this isn't an edge case limited to synthetic single-tenant testing — any multi-tenant cluster running lifecycle at all is exposed on every pass. The isolation result (0/5 failures) does suggest a single-bucket or single-tenant deployment would not observe this.
