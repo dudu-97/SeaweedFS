@@ -164,11 +164,65 @@ shard (achada via símbolos do binário, seção abaixo), já que com 1
 bucket só não existe concorrência nenhuma disputando o mesmo estado
 compartilhado.
 
+## Rodada de produção — caminho automático de verdade (10 buckets "clientes")
+
+Todas as rodadas acima usaram o comando manual `s3.lifecycle.run-shard`
+— que a própria documentação do comando descreve como um atalho de
+teste, pensado pra rodar "sem montar o stack completo de admin+worker".
+Faltava testar o caminho **automático de verdade**: o scheduler do
+`weed-admin` disparando a tarefa e o `weed-worker` executando.
+
+### Setup
+
+10 buckets simulando clientes reais (`cliente-1` a `cliente-10`),
+versionamento ligado, **cada um com uma regra de lifecycle diferente**
+(manter de 1 a 9 versões não-correntes), 5 deles com upload feito por
+usuários individuais provisionados via `s3.user.provision` (não admin).
+10 versões por bucket. Depois, esperamos o ciclo diário automático
+rodar sozinho (sem forçar nada manualmente) — confirmado via o
+histórico persistido em `/var/lib/seaweedfs/admin/plugin/job_types/s3_lifecycle/runs.json`,
+que sobrevive a restart do `weed-admin` (esse cluster já roda com
+`-dataDir` configurado).
+
+### Resultado — 10 de 10 corretos
+
+| Bucket | Regra (manter N não-corr.) | Esperado (1+N) | Real |
+|---|---|---|---|
+| cliente-1 | 2 | 3 | 3 ✅ |
+| cliente-2 | 3 | 4 | 4 ✅ |
+| cliente-3 | 2 | 3 | 3 ✅ |
+| cliente-4 | 4 | 5 | 5 ✅ |
+| cliente-5 | 7 | 8 | 8 ✅ |
+| cliente-6 | 5 | 6 | 6 ✅ |
+| cliente-7 | 6 | 7 | 7 ✅ |
+| cliente-8 | 1 | 2 | 2 ✅ |
+| cliente-9 | 8 | 9 | 9 ✅ |
+| cliente-10 | 9 | 10 | 10 ✅ (só tinha 9 não-correntes de início, nada a apagar) |
+
+Todos os 10 buckets processados na **mesma execução** (`runs.json`:
+`worker_id: w-swfs-m-725b`, `duration_ms: 2851`, `outcome: success`) —
+e todos bateram exatamente com a regra configurada. Nenhuma anomalia,
+mesmo sendo 10 buckets simultâneos, mais que qualquer lote manual
+testado antes.
+
+### Isso muda a conclusão principal
+
+**O bug de contagem parece ser específico do comando manual
+`s3.lifecycle.run-shard`, não do caminho de produção.** Isso é uma
+notícia boa pro uso real (cliente com ciclo automático não é afetado,
+até onde testamos), mas também reduz a urgência/gravidade do relato
+formal — vale reportar mesmo assim (é um bug real, reprodutível, e pode
+afetar quem usa o comando manual pra operação do dia a dia), só que com
+essa ressalva importante em destaque, não como "todo lifecycle sofre
+disso".
+
 ## Próximo passo
 
-Com 40 buckets em lotes múltiplos (32,5% de falha) contra 5 buckets
-isolados (0% de falha), a evidência já é forte o bastante pra enviar o
-relato formal como está — atualizado abaixo com essa rodada extra.
+Relato atualizado abaixo com essa ressalva. Se quiser reforçar ainda
+mais a certeza de que o automático está limpo, dá pra repetir esse
+teste de 10 buckets mais 2-3 vezes em dias diferentes — só que aí
+precisa esperar o ciclo diário de verdade, não dá pra forçar sem cair
+de novo no caminho manual.
 
 ---
 
@@ -188,11 +242,15 @@ relato formal como está — atualizado abaixo com essa rodada extra.
 
 ### Summary
 
-`NoncurrentVersionExpiration` with only `NewerNoncurrentVersions` set (no `NoncurrentDays`) is supposed to retain exactly the N newest noncurrent versions of every object and expire the rest on the next lifecycle pass. When a **single lifecycle invocation processes multiple buckets that each have their own copy of this rule**, some buckets intermittently end up with **one fewer noncurrent version than configured** — i.e. the rule over-deletes by exactly one version. The *current* version is never affected; only noncurrent-version retention undercounts.
+**Important scope note up front**: everything below (the 32.5% failure rate) was produced using the **manual** `weed shell` command `s3.lifecycle.run-shard` — which its own `-h` text describes as a way to drive the lifecycle engine "without standing up the full admin+worker plugin stack", i.e. a test/CI shortcut, not the production code path. We separately ran the **real automatic path** (the `weed-admin` scheduler dispatching to `weed-worker`, no manual trigger at all) against 10 buckets with 10 different retention rules, and got **10/10 correct** — see "Automatic-path control" below. So this appears to be a defect in the manual command's code path specifically, not in the scheduled production job. Reporting it regardless since the manual command is a real, documented, supported tool (used for on-demand/CI expiration), but the severity for customers relying purely on the daily automatic cycle looks low based on what we've measured so far.
+
+`NoncurrentVersionExpiration` with only `NewerNoncurrentVersions` set (no `NoncurrentDays`) is supposed to retain exactly the N newest noncurrent versions of every object and expire the rest on the next lifecycle pass. When a **single manual lifecycle invocation processes multiple buckets that each have their own copy of this rule**, some buckets intermittently end up with **one fewer noncurrent version than configured** — i.e. the rule over-deletes by exactly one version. The *current* version is never affected; only noncurrent-version retention undercounts.
 
 Observed rate: **13 out of 40 buckets (32.5%)** across batched runs (5 batches of 3 + 5 batches of 5, one lifecycle invocation per batch). The same setup, run back-to-back with no other change, produced anywhere from 0/3 to 4/5 failing buckets from one batch to the next — ruling out a simple, deterministic off-by-one and pointing at a timing/ordering-dependent (likely concurrency) issue rather than a pure logic bug.
 
 **Isolation control**: when the exact same steps are run with **only one bucket present** in the entire cluster (no other bucket carrying a lifecycle rule, confirmed via the tool's own `loaded lifecycle for 1 bucket(s)` log line), the failure **never occurred — 0 out of 5 independent single-bucket runs**, versus 32.5% across 40 buckets processed in multi-bucket batches. This strongly suggests the defect is specifically triggered by **concurrent processing of multiple buckets in the same pass**, not by the `NewerNoncurrentVersions` logic in isolation.
+
+**Automatic-path control**: 10 buckets (`cliente-1`..`cliente-10`), versioning enabled, each with a *different* `NewerNoncurrentVersions` value (1 through 9), 10 PutObject versions each (5 of the 10 buckets written via dedicated non-admin IAM users provisioned with `s3.user.provision`, to rule out any credential-related variable too). No manual `run-shard` was ever invoked for this run — we just waited for the daily scheduler. Confirmed via the persisted run history (`/var/lib/seaweedfs/admin/plugin/job_types/s3_lifecycle/runs.json`, which survives `weed-admin` restarts since this cluster runs with `-dataDir` configured) that the scheduler fired once (`worker_id: w-swfs-m-725b`, `duration_ms: 2851`, `outcome: success`) and processed all 10 buckets together. Result: **all 10 buckets ended with exactly the configured retention (1+N versions), zero anomalies** — a cleaner multi-bucket batch than any manual run we tested, with more buckets and more retention-value diversity.
 
 ### Steps to reproduce
 
@@ -288,6 +346,6 @@ This is inference from symbol names, struct shapes, and the isolation experiment
 
 ### Impact
 
-A customer relying on "always keep my N most recent versions" as a data-retention guarantee (e.g. compliance, quota planning, rollback expectations) can silently end up with N-1 in about 1 out of 3 lifecycle passes that happen to process their bucket alongside others. The current/live object is never at risk — only historical version depth is affected, and only when versions are pruned via lifecycle across a multi-bucket pass.
+**Revised down after the automatic-path control, see Summary.** The original concern was: a customer relying on "always keep my N most recent versions" as a data-retention guarantee (e.g. compliance, quota planning, rollback expectations) could silently end up with N-1 in about 1 out of 3 lifecycle passes that happen to process their bucket alongside others, since real deployments virtually always have more than one bucket with a lifecycle rule and both `s3.lifecycle.run-shard` and the daily scheduled run process every configured bucket together (no per-bucket invocation available).
 
-Since real deployments virtually always have more than one bucket with a lifecycle rule (and `s3.lifecycle.run-shard`/the daily scheduled run always process every configured bucket together, with no per-bucket invocation available), this isn't an edge case limited to synthetic single-tenant testing — any multi-tenant cluster running lifecycle at all is exposed on every pass. The isolation result (0/5 failures) does suggest a single-bucket or single-tenant deployment would not observe this.
+However, the one real automatic-path run we captured (10 buckets, 10 different rules, scheduler-dispatched, no manual trigger) came back 10/10 correct — better than any manual-command batch we tested, including smaller ones. Taken together with the isolation control (0/5 failures single-bucket), the evidence so far points at the defect being **specific to the manual `run-shard` code path**, not the production scheduler. We'd still like this fixed — `run-shard` is a real, documented, supported command (used for CI/on-demand expiration per its own `-h` text) and anyone using it operationally would be affected — but we no longer believe customers relying purely on the automatic daily cycle are at risk, pending more automatic-path samples to confirm that holds up over multiple days.
