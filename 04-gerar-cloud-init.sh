@@ -141,106 +141,277 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
 <meta charset="UTF-8">
 <title>Demo de upload — SeaweedFS S3</title>
 <style>
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
-  h1 { font-size: 1.3rem; }
-  fieldset { border: 1px solid #ccc; border-radius: 6px; margin-bottom: 20px; }
-  legend { font-weight: 600; padding: 0 6px; }
-  label { display: block; margin-top: 10px; font-size: 0.85rem; color: #444; }
-  input[type=text], input[type=password] { width: 100%; padding: 6px 8px; margin-top: 2px; box-sizing: border-box; font-family: monospace; }
-  button { margin-top: 14px; padding: 8px 16px; cursor: pointer; }
-  #log { background: #111; color: #0f0; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 6px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #ddd; font-size: 0.85rem; }
-  .warn { background: #fff3cd; border: 1px solid #ffe69c; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; }
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --border: #e2e4e9;
+    --text: #1a1c22;
+    --text-dim: #6b7078;
+    --accent: #2f5fd6;
+    --accent-dim: #eaf0fd;
+    --ok: #1f8a4c;
+    --warn-bg: #fff6e0;
+    --warn-border: #f0d896;
+    --danger: #c23b3b;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 28px 20px 60px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px; }
+  h1 { font-size: 1.35rem; margin: 0; }
+  .subtitle { font-size: 0.85rem; color: var(--text-dim); margin: 4px 0 18px; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--text-dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); display: inline-block; }
+  .dot.on { background: var(--ok); }
+
+  .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 10px 14px; border-radius: var(--radius); font-size: 0.82rem; margin-bottom: 18px; color: #6b5410; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 0.95rem; margin: 0 0 12px; }
+
+  .conn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 14px; align-items: end; }
+  label { display: block; font-size: 0.78rem; color: var(--text-dim); margin-bottom: 4px; }
+  input[type=text], input[type=password], select {
+    width: 100%; padding: 7px 9px; font-size: 0.85rem; font-family: monospace;
+    border: 1px solid var(--border); border-radius: 6px; background: #fbfbfc; color: var(--text);
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent); }
+
+  button {
+    padding: 8px 16px; font-size: 0.85rem; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    border-radius: 6px; font-weight: 500;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: #fff; color: var(--accent); }
+  button.ghost { background: transparent; color: var(--text-dim); border-color: var(--border); font-weight: 400; padding: 5px 10px; font-size: 0.78rem; }
+  button.danger { background: #fff; color: var(--danger); border-color: var(--danger); }
+
+  nav.tabs { display: flex; gap: 6px; margin: 18px 0 14px; flex-wrap: wrap; }
+  nav.tabs button {
+    background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 16px; font-weight: 500;
+  }
+  nav.tabs button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 0.83rem; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--text-dim); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.02em; }
+  td button { padding: 4px 9px; font-size: 0.75rem; margin-right: 4px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
+  .tile { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #fbfbfc; }
+  .tile .label { font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; }
+  .tile .value { font-family: monospace; font-size: 1.05rem; font-weight: 600; margin-top: 4px; }
+  .tile .sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 3px; }
+
+  .bar-track { height: 18px; background: #eee; border-radius: 4px; overflow: hidden; margin-top: 12px; display: flex; }
+  .bar-seg { height: 100%; }
+  .bar-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 0.78rem; color: var(--text-dim); flex-wrap: wrap; }
+  .bar-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+  .lock-fields { display: none; margin: 10px 0 0 0; padding: 10px 12px; background: var(--accent-dim); border-radius: 8px; }
+  .lock-fields.show { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; }
+
+  progress { width: 100%; height: 16px; accent-color: var(--accent); }
+  #progressWrap { display: none; margin-top: 12px; }
+  #progressText { font-size: 0.78rem; color: var(--text-dim); margin-top: 4px; }
+
+  .not-shown { background: #f5f5f5; border: 1px dashed #bbb; padding: 10px 12px; border-radius: 8px; font-size: 0.8rem; color: #555; margin-top: 14px; }
+
+  .log-toggle { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+  #log { background: #111; color: #0f0; font-family: monospace; font-size: 0.78rem; padding: 12px; border-radius: 8px; height: 200px; overflow-y: auto; white-space: pre-wrap; margin-top: 10px; }
+  #logCard.collapsed #log, #logCard.collapsed .log-hint { display: none; }
 </style>
 </head>
 <body>
+<div class="wrap">
 
-<div style="font-size:0.85rem;margin-bottom:16px"><a href="consumo.html">Consumo de dados por bucket &rarr;</a></div>
-<h1>Demo de upload — bucket S3 do SeaweedFS</h1>
+<header>
+  <h1>SeaweedFS S3 — demo interativa</h1>
+  <span class="status"><span class="dot" id="connDot"></span><span id="connLabel">desconectado</span></span>
+</header>
+<div class="subtitle">Envio, listagem, versionamento e retenção — direto pelo protocolo S3, sem intermediário.</div>
 
 <div class="warn">
-  <strong>Só para aprendizado.</strong> Esta página coloca a secret key
-  direto no JavaScript do navegador — qualquer app "de verdade" (Veeam,
-  backend, etc.) faz esse mesmo tipo de chamada, mas guarda a credencial no
-  servidor/aplicativo, nunca visível num navegador.
+  <strong>Só para aprendizado.</strong> Esta página coloca a secret key direto no JavaScript do navegador — qualquer app "de verdade" (Veeam, backend, etc.) faz esse mesmo tipo de chamada, mas guarda a credencial no servidor/aplicativo, nunca visível num navegador.
 </div>
 
-<fieldset>
-  <legend>1. Como o cliente S3 se conecta</legend>
-  <label>Endpoint (URL do gateway S3)
-    <input type="text" id="endpoint" value="">
-  </label>
-  <label>Bucket (crie antes com "mc mb", esta página não cria bucket)
-    <input type="text" id="bucket" value="meu-bucket-teste">
-  </label>
-  <label>Access Key
-    <input type="text" id="accessKey" value="__S3_ACCESS_KEY__">
-  </label>
-  <label>Secret Key
-    <input type="password" id="secretKey" value="__S3_SECRET_KEY__">
-  </label>
-  <button onclick="connect()">Conectar</button>
-</fieldset>
+<div class="card">
+  <h2>Conexão</h2>
+  <div class="conn-grid">
+    <div>
+      <label>Endpoint (gateway S3)</label>
+      <input type="text" id="endpoint" value="">
+    </div>
+    <div>
+      <label>Bucket</label>
+      <input type="text" id="bucket" value="meu-bucket-teste">
+    </div>
+    <div>
+      <label>Access Key</label>
+      <input type="text" id="accessKey" value="__S3_ACCESS_KEY__">
+    </div>
+    <div>
+      <label>Secret Key</label>
+      <input type="password" id="secretKey" value="__S3_SECRET_KEY__">
+    </div>
+    <div><button onclick="connect()">Conectar</button></div>
+  </div>
+</div>
 
-<fieldset>
-  <legend>2. Upload</legend>
-  <input type="file" id="fileInput">
-  <br>
-  <button onclick="upload()">Enviar arquivo</button>
-</fieldset>
+<nav class="tabs">
+  <button class="active" onclick="switchTab('upload')" id="tabbtn-upload">Upload</button>
+  <button onclick="switchTab('objetos')" id="tabbtn-objetos">Objetos</button>
+  <button onclick="switchTab('versionamento')" id="tabbtn-versionamento">Versionamento</button>
+  <button onclick="switchTab('retencao')" id="tabbtn-retencao">Retenção</button>
+</nav>
 
-<fieldset>
-  <legend>3. Objetos no bucket</legend>
-  <button onclick="listObjects()">Listar</button>
-  <table id="objTable">
-    <thead><tr><th>Chave</th><th>Tamanho</th><th>Modificado</th><th></th></tr></thead>
-    <tbody></tbody>
-  </table>
-</fieldset>
+<div class="tab-panel active" id="tab-upload">
+  <div class="card">
+    <h2>Enviar arquivo</h2>
+    <input type="file" id="fileInput">
+    <div style="margin-top:12px;">
+      <label style="display:inline-flex; align-items:center; gap:6px; margin-bottom:0;">
+        <input type="checkbox" id="lockEnabled" onchange="document.getElementById('lockFields').classList.toggle('show', this.checked)" style="width:auto;">
+        Aplicar retenção (Object Lock) neste upload
+      </label>
+    </div>
+    <div class="lock-fields" id="lockFields">
+      <div>
+        <label>Dias de retenção (a partir de agora)</label>
+        <input type="text" id="lockDays" value="1">
+      </div>
+      <div>
+        <label>Modo</label>
+        <select id="lockMode">
+          <option value="GOVERNANCE">Governance (pode ser destravado por quem tem permissão especial)</option>
+          <option value="COMPLIANCE">Compliance (ninguém destrava, nem admin, até a data vencer)</option>
+        </select>
+      </div>
+    </div>
+    <div><button style="margin-top:14px;" onclick="upload()">Enviar arquivo</button></div>
+    <div id="progressWrap">
+      <progress id="progressBar" value="0" max="100"></progress>
+      <div id="progressText"></div>
+    </div>
+  </div>
+</div>
 
-<fieldset>
-  <legend>4. Versionamento e lifecycle</legend>
-  <button onclick="checkVersioning()">Status do versionamento</button>
-  <button onclick="listVersions()">Listar versões (inclui excluídas)</button>
-  <table id="verTable">
-    <thead><tr><th>Chave</th><th>Version ID</th><th>Tipo</th><th>Atual?</th><th>Modificado</th><th></th></tr></thead>
-    <tbody></tbody>
-  </table>
-</fieldset>
+<div class="tab-panel" id="tab-objetos">
+  <div class="card">
+    <h2>Objetos no bucket</h2>
+    <button class="secondary" onclick="listObjects()">Listar</button>
+    <table id="objTable">
+      <thead><tr><th>Chave</th><th>Tamanho</th><th>Modificado</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
 
-<fieldset>
-  <legend>5. Métricas do bucket (SeaweedFS_s3_bucket_*)</legend>
-  <label>Endpoint de métricas (Prometheus — porta separada da API S3)
-    <input type="text" id="metricsEndpoint" value="">
-  </label>
-  <button onclick="checkBucketMetrics()">Consultar métricas</button>
-  <table id="metricsTable">
-    <thead><tr><th>Métrica</th><th>Valor</th></tr></thead>
-    <tbody></tbody>
-  </table>
-</fieldset>
+<div class="tab-panel" id="tab-versionamento">
+  <div class="card">
+    <h2>Status do versionamento</h2>
+    <button class="secondary" onclick="checkVersioning()">Consultar status</button>
+  </div>
+  <div class="card">
+    <h2>Atual vs. histórico retido</h2>
+    <button class="secondary" onclick="analyzeVersions()">Analisar versões</button>
+    <div class="tiles" id="versionTiles"></div>
+    <div class="bar-track" id="versionBar"></div>
+    <div class="bar-legend" id="versionLegend"></div>
+  </div>
+  <div class="card">
+    <h2>Todas as versões (inclui excluídas)</h2>
+    <button class="secondary" onclick="listVersions()">Listar versões</button>
+    <table id="verTable">
+      <thead><tr><th>Chave</th><th>Version ID</th><th>Tipo</th><th>Atual?</th><th>Modificado</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
 
-<fieldset>
-  <legend>Log (o que a página está mandando pro S3, passo a passo)</legend>
+<div class="tab-panel" id="tab-retencao">
+  <div class="card">
+    <h2>Retenção / imutável (Object Lock)</h2>
+    <button class="secondary" onclick="analyzeRetention()">Verificar retenção por versão</button>
+    <p style="font-size:0.8rem;color:var(--text-dim);margin-top:8px">Faz 1 chamada por versão (GetObjectRetention + GetObjectLegalHold) — processa até 300 versões nesta demo.</p>
+    <div class="tiles" id="retentionTiles"></div>
+  </div>
+  <div class="card">
+    <h2>Apagar com bypass de retenção (Governance)</h2>
+    <p style="font-size:0.8rem;color:var(--text-dim);margin-top:0">Tenta apagar uma versão específica mandando <code>x-amz-bypass-governance-retention: true</code>. Em Governance, quem tem a permissão especial consegue apagar mesmo com retenção ativa. Em Compliance, ninguém consegue — nem com bypass — até a data vencer.</p>
+    <div class="conn-grid" style="margin-top:10px">
+      <div>
+        <label>Chave (Key)</label>
+        <input type="text" id="bypassKey">
+      </div>
+      <div>
+        <label>Version ID</label>
+        <input type="text" id="bypassVersionId">
+      </div>
+      <div><button class="danger" onclick="deleteWithBypass()">Tentar apagar com bypass</button></div>
+    </div>
+    <p style="font-size:0.78rem;color:var(--text-dim);margin-top:8px">Dica: vá em "Versionamento" → "Listar versões" e copie a Chave/Version ID de um objeto com retenção ativa.</p>
+  </div>
+  <div class="not-shown">
+    <strong>O que esta página não mostra, de propósito:</strong> quanto do dado já virou Erasure Coding e quanto está marcado pra deletar aguardando vacuum. Essas duas informações são propriedade do <em>volume físico</em>, não do objeto S3 — só existem via administração do cluster (<code>weed shell</code>), nunca por credencial de cliente. Ver <code>COMANDOS-ADMIN.md</code> no repositório do lab.
+  </div>
+</div>
+
+<div class="card" id="logCard">
+  <div class="log-toggle" onclick="document.getElementById('logCard').classList.toggle('collapsed')">
+    <h2 style="margin:0">Log — o que a página está mandando pro S3, passo a passo</h2>
+    <button class="ghost" type="button">mostrar/ocultar</button>
+  </div>
   <div id="log"></div>
-</fieldset>
+</div>
+
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/aws-sdk@2.1691.0/dist/aws-sdk.min.js"></script>
 <script>
 let s3 = null;
 
-// endpoint padrão: mesmo host de onde esta página foi carregada, porta do
-// gateway S3 -- funciona tanto acessando via túnel (localhost) quanto de
-// dentro da rede do lab (IP da VM), sem precisar editar a página.
 document.getElementById('endpoint').value = window.location.protocol + '//' + window.location.hostname + ':8333';
-document.getElementById('metricsEndpoint').value = window.location.protocol + '//' + window.location.hostname + ':9327/metrics';
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('nav.tabs button').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('tabbtn-' + name).classList.add('active');
+}
 
 function log(msg) {
   const el = document.getElementById('log');
   const time = new Date().toLocaleTimeString();
   el.textContent += `[${time}] ${msg}\n`;
   el.scrollTop = el.scrollHeight;
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  const units = ['KB','MB','GB','TB'];
+  let u = -1;
+  do { n /= 1024; u++; } while (n >= 1024 && u < units.length - 1);
+  return n.toFixed(2) + ' ' + units[u];
+}
+
+function tile(container, label, value, sub) {
+  const div = document.createElement('div');
+  div.className = 'tile';
+  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div>` + (sub ? `<div class="sub">${sub}</div>` : '');
+  container.appendChild(div);
 }
 
 function connect() {
@@ -256,6 +427,9 @@ function connect() {
     signatureVersion: 'v4',
   });
 
+  document.getElementById('connDot').classList.add('on');
+  document.getElementById('connLabel').textContent = accessKeyId + '@' + endpoint.replace(/^https?:\/\//, '');
+
   log(`Cliente S3 configurado: endpoint=${endpoint}, path-style=true, accessKey=${accessKeyId}`);
   log('Pronto para enviar/listar. Toda chamada abaixo é HTTP assinado com AWS Signature V4 — mesmo protocolo que o Veeam usa por baixo dos panos.');
 }
@@ -266,15 +440,43 @@ function upload() {
   if (!file) { log('ERRO: escolha um arquivo primeiro.'); return; }
   const bucket = document.getElementById('bucket').value.trim();
 
-  log(`PUT ${bucket}/${file.name} (${file.size} bytes, ${file.type || 'application/octet-stream'})...`);
-  s3.putObject({
+  const params = {
     Bucket: bucket,
     Key: file.name,
     Body: file,
     ContentType: file.type || 'application/octet-stream',
-  }, (err, data) => {
-    if (err) { log(`FALHOU: ${err.message}`); return; }
+  };
+
+  const lockEnabled = document.getElementById('lockEnabled').checked;
+  let logLine = `PUT ${bucket}/${file.name} (${file.size} bytes, ${file.type || 'application/octet-stream'})`;
+  if (lockEnabled) {
+    const days = parseFloat(document.getElementById('lockDays').value) || 0;
+    const mode = document.getElementById('lockMode').value;
+    const retainUntil = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+    params.ObjectLockMode = mode;
+    params.ObjectLockRetainUntilDate = retainUntil;
+    logLine += ` com Object Lock (${mode}, até ${retainUntil.toLocaleString()})`;
+  }
+  log(logLine + ' — usando upload multipart pra ter barra de progresso...');
+
+  const progressWrap = document.getElementById('progressWrap');
+  const progressBar = document.getElementById('progressBar');
+  const progressText = document.getElementById('progressText');
+  progressWrap.style.display = 'block';
+  progressBar.value = 0;
+  progressText.textContent = 'Iniciando...';
+
+  const mb = n => (n / (1024 * 1024)).toFixed(1);
+  const managed = s3.upload(params, { partSize: 16 * 1024 * 1024, queueSize: 4 });
+  managed.on('httpUploadProgress', p => {
+    const pct = p.total ? Math.round((p.loaded / p.total) * 100) : 0;
+    progressBar.value = pct;
+    progressText.textContent = `${pct}% — ${mb(p.loaded)} MB / ${mb(p.total || file.size)} MB`;
+  });
+  managed.send((err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); progressWrap.style.display = 'none'; return; }
     log(`OK — ETag=${data.ETag}`);
+    progressText.textContent = 'Concluído.';
     listObjects();
   });
 }
@@ -291,6 +493,7 @@ function listObjects() {
     (data.Contents || []).forEach(obj => {
       const tr = document.createElement('tr');
       const btn = document.createElement('button');
+      btn.className = 'ghost';
       btn.textContent = 'Baixar';
       btn.onclick = () => downloadObject(obj.Key);
       tr.innerHTML = `<td>${obj.Key}</td><td>${obj.Size} B</td><td>${new Date(obj.LastModified).toLocaleString()}</td>`;
@@ -314,6 +517,48 @@ function checkVersioning() {
   });
 }
 
+function analyzeVersions() {
+  if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
+  const bucket = document.getElementById('bucket').value.trim();
+  log(`GET ${bucket}/?versions (ListObjectVersions), somando atual vs. histórico...`);
+
+  s3.listObjectVersions({ Bucket: bucket }, (err, data) => {
+    if (err) { log(`FALHOU: ${err.message}`); return; }
+    const versions = data.Versions || [];
+    const markers = data.DeleteMarkers || [];
+    let current = 0, historic = 0;
+    versions.forEach(v => { if (v.IsLatest) current += v.Size; else historic += v.Size; });
+
+    const container = document.getElementById('versionTiles');
+    container.innerHTML = '';
+    const total = current + historic;
+    tile(container, 'Versão atual', fmtBytes(current), (versions.filter(v=>v.IsLatest).length) + ' objeto(s)');
+    tile(container, 'Histórico retido', fmtBytes(historic), (versions.filter(v=>!v.IsLatest).length) + ' versão(ões) antiga(s)');
+    tile(container, 'Delete markers', markers.length, 'chaves sem conteúdo, só marcador');
+    tile(container, '% que é histórico', total > 0 ? ((historic/total)*100).toFixed(1) + '%' : '0%', 'do total lógico deste bucket');
+
+    const bar = document.getElementById('versionBar');
+    bar.innerHTML = '';
+    if (total > 0) {
+      const curSeg = document.createElement('div');
+      curSeg.className = 'bar-seg';
+      curSeg.style.width = (current/total*100) + '%';
+      curSeg.style.background = '#2f8f5b';
+      const histSeg = document.createElement('div');
+      histSeg.className = 'bar-seg';
+      histSeg.style.width = (historic/total*100) + '%';
+      histSeg.style.background = '#b87a1e';
+      bar.appendChild(curSeg);
+      bar.appendChild(histSeg);
+    }
+    document.getElementById('versionLegend').innerHTML =
+      '<span><span class="sw" style="background:#2f8f5b"></span>versão atual</span>' +
+      '<span><span class="sw" style="background:#b87a1e"></span>histórico retido (não-atual)</span>';
+
+    log(`OK — ${versions.length} versão(ões) real(is) + ${markers.length} delete marker(s). Atual=${fmtBytes(current)}, histórico=${fmtBytes(historic)}.`);
+  });
+}
+
 function listVersions() {
   if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
   const bucket = document.getElementById('bucket').value.trim();
@@ -332,21 +577,33 @@ function listVersions() {
       const tr = document.createElement('tr');
       tr.innerHTML = `<td>${v.Key}</td><td style="font-family:monospace">${v.VersionId}</td><td>${v.type}</td><td>${v.IsLatest ? 'sim' : 'não'}</td><td>${new Date(v.LastModified).toLocaleString()}</td>`;
       const td = document.createElement('td');
-      // delete marker não tem conteúdo -- não dá pra baixar nem restaurar, só apagar
       if (v.type === 'Versão') {
         const dlBtn = document.createElement('button');
+        dlBtn.className = 'ghost';
         dlBtn.textContent = 'Baixar';
         dlBtn.onclick = () => downloadObject(v.Key, v.VersionId);
         td.appendChild(dlBtn);
 
         if (!v.IsLatest) {
           const restoreBtn = document.createElement('button');
+          restoreBtn.className = 'ghost';
           restoreBtn.textContent = 'Restaurar como atual';
           restoreBtn.onclick = () => restoreVersion(v.Key, v.VersionId);
           td.appendChild(restoreBtn);
         }
+
+        const bypassLinkBtn = document.createElement('button');
+        bypassLinkBtn.className = 'ghost';
+        bypassLinkBtn.textContent = 'Testar bypass →';
+        bypassLinkBtn.onclick = () => {
+          document.getElementById('bypassKey').value = v.Key;
+          document.getElementById('bypassVersionId').value = v.VersionId;
+          switchTab('retencao');
+        };
+        td.appendChild(bypassLinkBtn);
       }
       const delBtn = document.createElement('button');
+      delBtn.className = 'ghost';
       delBtn.textContent = 'Apagar esta versão';
       delBtn.onclick = () => deleteVersion(v.Key, v.VersionId);
       td.appendChild(delBtn);
@@ -408,258 +665,22 @@ function deleteVersion(key, versionId) {
   });
 }
 
-function checkBucketMetrics() {
-  const bucket = document.getElementById('bucket').value.trim();
-  const url = document.getElementById('metricsEndpoint').value.trim();
-
-  log(`GET ${url} (Prometheus /metrics, filtrando bucket="${bucket}")...`);
-  fetch(url).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
-  }).then(text => {
-    const wanted = ['SeaweedFS_s3_bucket_size_bytes', 'SeaweedFS_s3_bucket_physical_size_bytes', 'SeaweedFS_s3_bucket_quota_bytes', 'SeaweedFS_s3_bucket_read_only'];
-    const tbody = document.querySelector('#metricsTable tbody');
-    tbody.innerHTML = '';
-    let found = 0;
-    text.split('\n').forEach(line => {
-      if (!line || line.startsWith('#')) return;
-      const m = line.match(/^(\S+?)\{([^}]*)\}\s+([0-9.eE+-]+)/);
-      if (!m) return;
-      const [, name, labels, value] = m;
-      if (!wanted.includes(name) || !labels.includes(`bucket="${bucket}"`)) return;
-      found++;
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${name}</td><td>${value}</td>`;
-      tbody.appendChild(tr);
-    });
-    log(found ? `OK — ${found} métrica(s) pro bucket "${bucket}".` : `Nenhuma métrica encontrada pro bucket "${bucket}" ainda (o coletor demora alguns segundos após a primeira atividade, ou confira o nome do bucket).`);
-  }).catch(err => {
-    log(`FALHOU: ${err.message}. Se for erro de rede sem detalhe (CORS), o navegador bloqueia fetch() entre portas diferentes sem cabeçalho Access-Control-Allow-Origin — teste via terminal: curl ${url} | grep bucket`);
-  });
-}
-</script>
-
-</body>
-</html>
-ENDHTML
-)
-UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
-UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
-
-# --- página irmã: consumo de dados por bucket (lógico/físico, versão
-# atual vs histórico, retenção) -- serve ao lado da demo de upload,
-# mesmo host/porta, arquivo separado de propósito (escopo diferente:
-# 1 bucket específico, não o cluster inteiro). Sem placeholder de
-# credencial aqui -- reaproveita o de cima.
-CONSUMO_HTML=$(cat <<'ENDCONSUMO'
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8">
-<title>Consumo de dados — SeaweedFS S3</title>
-<style>
-  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
-  h1 { font-size: 1.3rem; }
-  fieldset { border: 1px solid #ccc; border-radius: 6px; margin-bottom: 20px; }
-  legend { font-weight: 600; padding: 0 6px; }
-  label { display: block; margin-top: 10px; font-size: 0.85rem; color: #444; }
-  input[type=text], input[type=password] { width: 100%; padding: 6px 8px; margin-top: 2px; box-sizing: border-box; font-family: monospace; }
-  button { margin-top: 14px; padding: 8px 16px; cursor: pointer; }
-  #log { background: #111; color: #0f0; font-family: monospace; font-size: 0.8rem; padding: 12px; border-radius: 6px; height: 220px; overflow-y: auto; white-space: pre-wrap; }
-  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid #ddd; font-size: 0.85rem; }
-  .warn { background: #fff3cd; border: 1px solid #ffe69c; padding: 10px; border-radius: 6px; font-size: 0.85rem; margin-bottom: 20px; }
-  .nav { font-size: 0.85rem; margin-bottom: 16px; }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
-  .tile { border: 1px solid #ddd; border-radius: 6px; padding: 10px 12px; }
-  .tile .label { font-size: 0.75rem; color: #666; text-transform: uppercase; letter-spacing: 0.03em; }
-  .tile .value { font-family: monospace; font-size: 1.1rem; font-weight: 600; margin-top: 4px; }
-  .bar-track { height: 20px; background: #eee; border-radius: 4px; overflow: hidden; margin-top: 12px; display: flex; }
-  .bar-seg { height: 100%; }
-  .bar-legend { display: flex; gap: 16px; margin-top: 8px; font-size: 0.8rem; color: #444; flex-wrap: wrap; }
-  .bar-legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
-  .not-shown { background: #f5f5f5; border: 1px dashed #bbb; padding: 10px 12px; border-radius: 6px; font-size: 0.82rem; color: #555; margin-top: 14px; }
-</style>
-</head>
-<body>
-
-<div class="nav"><a href="index.html">&larr; Demo de upload</a></div>
-
-<h1>Consumo de dados — quebra por bucket</h1>
-
-<div class="warn">
-  <strong>Só para aprendizado.</strong> Mesma ressalva da página de upload: a secret key fica no JavaScript do navegador, só aceitável em lab.
-</div>
-
-<fieldset>
-  <legend>1. Como o cliente S3 se conecta</legend>
-  <label>Endpoint (URL do gateway S3)
-    <input type="text" id="endpoint" value="">
-  </label>
-  <label>Bucket
-    <input type="text" id="bucket" value="poc-versioning">
-  </label>
-  <label>Access Key
-    <input type="text" id="accessKey" value="__S3_ACCESS_KEY__">
-  </label>
-  <label>Secret Key
-    <input type="password" id="secretKey" value="__S3_SECRET_KEY__">
-  </label>
-  <button onclick="connect()">Conectar</button>
-</fieldset>
-
-<fieldset>
-  <legend>2. Lógico vs físico (Prometheus, porta separada)</legend>
-  <label>Endpoint de métricas
-    <input type="text" id="metricsEndpoint" value="">
-  </label>
-  <button onclick="checkOverhead()">Consultar</button>
-  <div class="tiles" id="overheadTiles"></div>
-</fieldset>
-
-<fieldset>
-  <legend>3. Versionamento — atual vs. histórico retido</legend>
-  <button onclick="analyzeVersions()">Analisar versões</button>
-  <div class="tiles" id="versionTiles"></div>
-  <div class="bar-track" id="versionBar"></div>
-  <div class="bar-legend" id="versionLegend"></div>
-</fieldset>
-
-<fieldset>
-  <legend>4. Retenção / imutável (Object Lock)</legend>
-  <button onclick="analyzeRetention()">Verificar retenção por versão</button>
-  <p style="font-size:0.8rem;color:#666;margin-top:6px">Faz 1 chamada por versão (GetObjectRetention + GetObjectLegalHold) — processa até 300 versões nesta demo.</p>
-  <div class="tiles" id="retentionTiles"></div>
-</fieldset>
-
-<div class="not-shown">
-  <strong>O que esta página não mostra, de propósito:</strong> quanto do dado já virou Erasure Coding e quanto está marcado pra deletar aguardando vacuum. Essas duas informações são propriedade do <em>volume físico</em>, não do objeto S3 — só existem via administração do cluster (<code>weed shell</code>), nunca por credencial de cliente. Ver <code>COMANDOS-ADMIN.md</code> no repositório do lab.
-</div>
-
-<fieldset>
-  <legend>Log</legend>
-  <div id="log"></div>
-</fieldset>
-
-<script src="https://cdn.jsdelivr.net/npm/aws-sdk@2.1691.0/dist/aws-sdk.min.js"></script>
-<script>
-let s3 = null;
-
-document.getElementById('endpoint').value = window.location.protocol + '//' + window.location.hostname + ':8333';
-document.getElementById('metricsEndpoint').value = window.location.protocol + '//' + window.location.hostname + ':9327/metrics';
-
-function log(msg) {
-  const el = document.getElementById('log');
-  const time = new Date().toLocaleTimeString();
-  el.textContent += `[${time}] ${msg}\n`;
-  el.scrollTop = el.scrollHeight;
-}
-
-function connect() {
-  const endpoint = document.getElementById('endpoint').value.trim();
-  const accessKeyId = document.getElementById('accessKey').value.trim();
-  const secretAccessKey = document.getElementById('secretKey').value.trim();
-
-  AWS.config.update({ accessKeyId, secretAccessKey, region: 'us-east-1' });
-  s3 = new AWS.S3({
-    endpoint: new AWS.Endpoint(endpoint),
-    s3ForcePathStyle: true,
-    signatureVersion: 'v4',
-  });
-  log(`Cliente S3 configurado: endpoint=${endpoint}, accessKey=${accessKeyId}`);
-}
-
-function tile(container, label, value, sub) {
-  const div = document.createElement('div');
-  div.className = 'tile';
-  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div>` + (sub ? `<div class="label" style="text-transform:none;margin-top:4px">${sub}</div>` : '');
-  container.appendChild(div);
-}
-
-function fmtBytes(n) {
-  if (n < 1024) return n + ' B';
-  const units = ['KB','MB','GB','TB'];
-  let u = -1;
-  do { n /= 1024; u++; } while (n >= 1024 && u < units.length - 1);
-  return n.toFixed(2) + ' ' + units[u];
-}
-
-function checkOverhead() {
-  const bucket = document.getElementById('bucket').value.trim();
-  const url = document.getElementById('metricsEndpoint').value.trim();
-  log(`GET ${url} (Prometheus /metrics), filtrando bucket="${bucket}"...`);
-
-  fetch(url).then(r => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
-  }).then(text => {
-    let logical = null, physical = null;
-    text.split('\n').forEach(line => {
-      if (line.startsWith('#')) return;
-      const m = line.match(/^(\S+?)\{([^}]*)\}\s+([0-9.eE+-]+)/);
-      if (!m) return;
-      const [, name, labels, value] = m;
-      if (!labels.includes(`bucket="${bucket}"`)) return;
-      if (name === 'SeaweedFS_s3_bucket_size_bytes') logical = parseFloat(value);
-      if (name === 'SeaweedFS_s3_bucket_physical_size_bytes') physical = parseFloat(value);
-    });
-
-    const container = document.getElementById('overheadTiles');
-    container.innerHTML = '';
-    if (logical === null) {
-      log(`Nenhuma métrica encontrada pro bucket "${bucket}" ainda (sem atividade recente, ou nome errado).`);
-      return;
-    }
-    const overhead = physical - logical;
-    const pct = logical > 0 ? ((overhead / logical) * 100).toFixed(1) : '0.0';
-    tile(container, 'Lógico', fmtBytes(logical), 'todas as versões somadas');
-    tile(container, 'Físico', fmtBytes(physical), 'réplicas + paridade EC + não-vacuumado');
-    tile(container, 'Overhead', fmtBytes(Math.max(overhead, 0)), `+${pct}% sobre o lógico`);
-    log(`OK — lógico=${fmtBytes(logical)}, físico=${fmtBytes(physical)}, overhead=${fmtBytes(Math.max(overhead,0))} (${pct}%). Overhead mistura replicação+EC+lixo não-vacuumado — não dá pra separar qual é qual só com isso.`);
-  }).catch(err => {
-    log(`FALHOU: ${err.message}. Se for erro de rede sem detalhe, pode ser CORS — teste via terminal: curl ${url} | grep bucket`);
-  });
-}
-
-function analyzeVersions() {
+function deleteWithBypass() {
   if (!s3) { log('ERRO: clique em "Conectar" primeiro.'); return; }
   const bucket = document.getElementById('bucket').value.trim();
-  log(`GET ${bucket}/?versions (ListObjectVersions), somando atual vs. histórico...`);
+  const key = document.getElementById('bypassKey').value.trim();
+  const versionId = document.getElementById('bypassVersionId').value.trim();
+  if (!key || !versionId) { log('ERRO: preencha Chave e Version ID (ou use "Testar bypass →" na aba Versionamento).'); return; }
 
-  s3.listObjectVersions({ Bucket: bucket }, (err, data) => {
-    if (err) { log(`FALHOU: ${err.message}`); return; }
-    const versions = data.Versions || [];
-    const markers = data.DeleteMarkers || [];
-    let current = 0, historic = 0;
-    versions.forEach(v => { if (v.IsLatest) current += v.Size; else historic += v.Size; });
-
-    const container = document.getElementById('versionTiles');
-    container.innerHTML = '';
-    const total = current + historic;
-    tile(container, 'Versão atual', fmtBytes(current), (versions.filter(v=>v.IsLatest).length) + ' objeto(s)');
-    tile(container, 'Histórico retido', fmtBytes(historic), (versions.filter(v=>!v.IsLatest).length) + ' versão(ões) antiga(s)');
-    tile(container, 'Delete markers', markers.length, 'chaves sem conteúdo, só marcador');
-    tile(container, '% que é histórico', total > 0 ? ((historic/total)*100).toFixed(1) + '%' : '0%', 'do total lógico deste bucket');
-
-    const bar = document.getElementById('versionBar');
-    bar.innerHTML = '';
-    if (total > 0) {
-      const curSeg = document.createElement('div');
-      curSeg.className = 'bar-seg';
-      curSeg.style.width = (current/total*100) + '%';
-      curSeg.style.background = '#2f8f5b';
-      const histSeg = document.createElement('div');
-      histSeg.className = 'bar-seg';
-      histSeg.style.width = (historic/total*100) + '%';
-      histSeg.style.background = '#b87a1e';
-      bar.appendChild(curSeg);
-      bar.appendChild(histSeg);
+  log(`DELETE ${bucket}/${key}?versionId=${versionId} com header x-amz-bypass-governance-retention: true...`);
+  s3.deleteObject({ Bucket: bucket, Key: key, VersionId: versionId, BypassGovernanceRetention: true }, (err) => {
+    if (err) {
+      log(`FALHOU (${err.code || err.statusCode}): ${err.message} — se a versão estiver em modo COMPLIANCE, este resultado é o esperado: nem bypass, nem credencial admin derruba a trava antes do prazo.`);
+      return;
     }
-    document.getElementById('versionLegend').innerHTML =
-      '<span><span class="sw" style="background:#2f8f5b"></span>versão atual</span>' +
-      '<span><span class="sw" style="background:#b87a1e"></span>histórico retido (não-atual)</span>';
-
-    log(`OK — ${versions.length} versão(ões) real(is) + ${markers.length} delete marker(s). Atual=${fmtBytes(current)}, histórico=${fmtBytes(historic)}.`);
+    log(`OK — apagada mesmo com retenção ativa. Isso só funciona em modo GOVERNANCE, e só com a permissão especial (s3:BypassGovernanceRetention) — prova que Governance é destravável, Compliance não é.`);
+    listVersions();
+    analyzeRetention();
   });
 }
 
@@ -705,10 +726,10 @@ function analyzeRetention() {
 
 </body>
 </html>
-ENDCONSUMO
+ENDHTML
 )
-CONSUMO_HTML="${CONSUMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
-CONSUMO_HTML="${CONSUMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
+UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
+UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
 
 for vm in "${VM_NAMES[@]}"; do
     VM_DIR="$LAB_DIR/$vm"
@@ -975,17 +996,11 @@ for vm in "${VM_NAMES[@]}"; do
 
     if [[ "$vm" == "$UPLOAD_DEMO_HOST" ]]; then
         UPLOAD_DEMO_HTML_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_HTML" | indent "      ")
-        CONSUMO_HTML_INDENTED=$(printf '%s\n' "$CONSUMO_HTML" | indent "      ")
         WEED_UNITS+="
   - path: /var/www/upload-demo/index.html
     permissions: '0644'
     content: |
 ${UPLOAD_DEMO_HTML_INDENTED}
-
-  - path: /var/www/upload-demo/consumo.html
-    permissions: '0644'
-    content: |
-${CONSUMO_HTML_INDENTED}
 
   - path: /etc/systemd/system/weed-upload-demo.service
     permissions: '0644'
