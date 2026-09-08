@@ -373,6 +373,7 @@ SeaweedFS/
 ├── 00-config.env ... 08-atualizar-seaweed.sh, deploy-lab.sh
 ├── README.md                     # este arquivo — arquitetura, instalação, operação
 ├── HISTORICO.md                  # tudo que já foi testado e descoberto, em ordem cronológica
+├── COMANDOS.md                   # referência direta: comandos de administração (EC, versionamento, volumes)
 ├── POCS.md                       # índice dos POC-N.md (um documento por teste, a partir de agora)
 ├── RELATO-EC-RATIO-DEV.md        # relato formal (EN) pro dev/suporte — bug do ec.encode manual
 ├── RELATO-EC-AUTO-STUCK-DEV.md   # relato formal (EN) pro dev/suporte — bug da fila de EC automática
