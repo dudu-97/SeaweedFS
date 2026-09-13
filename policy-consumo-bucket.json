@@ -1,0 +1,76 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PermitirUsoNormalDoObjeto",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:DeleteObjectVersion",
+        "s3:ListBucket",
+        "s3:ListBucketVersions",
+        "s3:GetBucketLocation",
+        "s3:GetBucketVersioning",
+        "s3:GetBucketObjectLockConfiguration",
+        "s3:GetObjectRetention",
+        "s3:PutObjectRetention",
+        "s3:GetObjectLegalHold",
+        "s3:GetBucketTagging",
+        "s3:GetObjectTagging",
+        "s3:PutObjectTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::c00001-ansata",
+        "arn:aws:s3:::c00001-ansata/*"
+      ]
+    },
+    {
+      "Sid": "PermitirMultipartUpload",
+      "Effect": "Allow",
+      "Action": [
+        "s3:CreateMultipartUpload",
+        "s3:UploadPart",
+        "s3:CompleteMultipartUpload",
+        "s3:AbortMultipartUpload",
+        "s3:ListMultipartUploads",
+        "s3:ListParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::c00001-ansata",
+        "arn:aws:s3:::c00001-ansata/*"
+      ]
+    },
+    {
+      "Sid": "BloquearRemocaoDoBucket",
+      "Effect": "Deny",
+      "Action": "s3:DeleteBucket",
+      "Resource": "arn:aws:s3:::c00001-ansata"
+    },
+    {
+      "Sid": "BloquearAlteracaoDeVersionamento",
+      "Effect": "Deny",
+      "Action": "s3:PutBucketVersioning",
+      "Resource": "arn:aws:s3:::c00001-ansata"
+    },
+    {
+      "Sid": "BloquearAlteracaoDoObjectLock",
+      "Effect": "Deny",
+      "Action": "s3:PutBucketObjectLockConfiguration",
+      "Resource": "arn:aws:s3:::c00001-ansata"
+    },
+    {
+      "Sid": "BloquearBypassGovernance",
+      "Effect": "Deny",
+      "Action": "s3:BypassGovernanceRetention",
+      "Resource": "arn:aws:s3:::c00001-ansata/*"
+    },
+    {
+      "Sid": "BloquearRemocaoDeLegalHold",
+      "Effect": "Deny",
+      "Action": "s3:PutObjectLegalHold",
+      "Resource": "arn:aws:s3:::c00001-ansata/*"
+    }
+  ]
+}

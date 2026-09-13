@@ -241,7 +241,7 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
   <h1>SeaweedFS S3 — demo interativa</h1>
   <span class="status"><span class="dot" id="connDot"></span><span id="connLabel">desconectado</span></span>
 </header>
-<div class="subtitle">Envio, listagem, versionamento e retenção — direto pelo protocolo S3, sem intermediário.</div>
+<div class="subtitle">Envio, listagem, versionamento, retenção e cota — direto pelo protocolo S3, sem intermediário.</div>
 
 <div class="warn">
   <strong>Só para aprendizado.</strong> Esta página coloca a secret key direto no JavaScript do navegador — qualquer app "de verdade" (Veeam, backend, etc.) faz esse mesmo tipo de chamada, mas guarda a credencial no servidor/aplicativo, nunca visível num navegador.
@@ -275,6 +275,7 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
   <button onclick="switchTab('objetos')" id="tabbtn-objetos">Objetos</button>
   <button onclick="switchTab('versionamento')" id="tabbtn-versionamento">Versionamento</button>
   <button onclick="switchTab('retencao')" id="tabbtn-retencao">Retenção</button>
+  <button onclick="switchTab('cota')" id="tabbtn-cota">Métricas</button>
 </nav>
 
 <div class="tab-panel active" id="tab-upload">
@@ -366,6 +367,33 @@ UPLOAD_DEMO_HTML=$(cat <<'ENDHTML'
   </div>
   <div class="not-shown">
     <strong>O que esta página não mostra, de propósito:</strong> quanto do dado já virou Erasure Coding e quanto está marcado pra deletar aguardando vacuum. Essas duas informações são propriedade do <em>volume físico</em>, não do objeto S3 — só existem via administração do cluster (<code>weed shell</code>), nunca por credencial de cliente. Ver <code>COMANDOS-ADMIN.md</code> no repositório do lab.
+  </div>
+</div>
+
+<div class="tab-panel" id="tab-cota">
+  <div class="card">
+    <h2>Dados consumidos — lógico, físico e cota</h2>
+    <p style="font-size:0.8rem;color:var(--text-dim);margin:0 0 12px;line-height:1.5">
+      Lógico/físico vêm direto do <code>/metrics</code> do gateway S3 (definição repassada pelo dev):<br>
+      <code>bucket_size_bytes</code> — <strong>lógico</strong>: uma cópia do dado vivo.<br>
+      <code>bucket_physical_size_bytes</code> — <strong>físico (em disco)</strong>: todas as réplicas + paridade EC, incluindo dado ainda não compactado pelo vacuum.<br>
+      A <strong>cota abaixo é informativa</strong> — guardada por esta demo, não é a <code>s3.bucket.quota</code> real do SeaweedFS. Isso é proposital: a cota real do SeaweedFS trava o bucket sozinha ao estourar (loop de enforcement automático embutido no gateway, confirmamos isso ao vivo), sem flag pra acompanhar sem correr risco de lock. Aqui é só acompanhamento — nunca trava nada.
+    </p>
+    <div class="conn-grid" style="margin-bottom:12px">
+      <div>
+        <label>Cota informativa (MB) — vazio/0 remove</label>
+        <input type="text" id="quotaMbInput" placeholder="ex.: 2048">
+      </div>
+      <div><button class="secondary" onclick="saveQuota()">Salvar cota</button></div>
+    </div>
+    <button class="secondary" onclick="checkQuota()">Consultar métricas</button>
+    <div class="tiles" id="quotaTiles"></div>
+    <div class="bar-track" id="quotaBar"></div>
+    <div class="bar-legend" id="quotaLegend"></div>
+    <div id="quotaMsg" style="font-size:0.8rem;color:var(--text-dim);margin-top:8px"></div>
+  </div>
+  <div class="not-shown">
+    <strong>De onde vem esse número:</strong> a cota é configurada via <code>weed shell</code> (<code>s3.bucket.quota</code>) — fora do alcance de qualquer credencial S3, inclusive a desta página. O que você vê aqui vem de um proxy somente-leitura no próprio servidor da demo (<code>server.py</code>), que lê o <code>/metrics</code> Prometheus do gateway S3 (porta 9327, só em <code>localhost</code>) e devolve apenas os números do bucket pedido — o navegador nunca fala direto com <code>/metrics</code> nem enxerga credencial admin.
   </div>
 </div>
 
@@ -722,6 +750,99 @@ function analyzeRetention() {
     });
   });
 }
+
+function checkQuota() {
+  const bucket = document.getElementById('bucket').value.trim();
+  if (!bucket) { log('ERRO: informe um bucket.'); return; }
+
+  log(`GET /api/quota?bucket=${bucket} — proxy local no server.py da demo, lê o /metrics do gateway S3 (porta 9327), não fala com S3 nem com weed shell...`);
+  fetch('/api/quota?bucket=' + encodeURIComponent(bucket))
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) { log(`FALHOU: ${data.error || 'erro desconhecido'}`); return; }
+
+      const tiles = document.getElementById('quotaTiles');
+      const bar = document.getElementById('quotaBar');
+      const legend = document.getElementById('quotaLegend');
+      const msg = document.getElementById('quotaMsg');
+      tiles.innerHTML = '';
+      bar.innerHTML = '';
+      legend.innerHTML = '';
+      msg.textContent = '';
+
+      if (data.used_bytes === null || data.used_bytes === undefined) {
+        msg.textContent = 'Sem métrica publicada ainda pra este bucket (precisa de pelo menos 1 request S3 nele antes de aparecer no /metrics).';
+        log('OK — bucket ainda sem série no /metrics.');
+        return;
+      }
+
+      tile(tiles, 'Lógico', fmtBytes(data.used_bytes), (data.object_count ?? '?') + ' objeto(s) — 1 cópia do dado vivo (soma versão atual + histórico retido)');
+
+      if (data.physical_size_bytes !== null && data.physical_size_bytes !== undefined) {
+        const overhead = data.used_bytes > 0 ? (data.physical_size_bytes / data.used_bytes) : null;
+        tile(tiles, 'Físico (em disco)', fmtBytes(data.physical_size_bytes), overhead ? overhead.toFixed(2) + 'x o lógico — réplicas + paridade EC + não-vacuumado' : 'réplicas + paridade EC + não-vacuumado');
+      }
+
+      if (data.read_only) {
+        msg.textContent = 'Atenção: este bucket está TRAVADO de verdade pelo SeaweedFS (existe uma s3.bucket.quota real configurada nele, fora desta demo) — isso não tem relação com a cota informativa abaixo.';
+      }
+
+      if (!data.has_quota) {
+        tile(tiles, 'Cota informativa', 'não definida', 'defina no campo acima pra acompanhar consumo');
+        log(`OK — usado=${fmtBytes(data.used_bytes)}, sem cota informativa definida.`);
+        return;
+      }
+
+      const pct = data.quota_bytes > 0 ? (data.used_bytes / data.quota_bytes * 100) : 0;
+      tile(tiles, 'Cota informativa', fmtBytes(data.quota_bytes), 'guardada nesta demo, não trava o bucket');
+      tile(tiles, '% da cota usado', pct.toFixed(1) + '%', pct > 100 ? 'acima do informativo — SeaweedFS não trava por isso' : 'dentro do informativo');
+      if (data.over_quota_bytes > 0) {
+        tile(tiles, 'Excedente (informativo)', fmtBytes(data.over_quota_bytes), 'acima da cota informativa, sem efeito no SeaweedFS');
+      }
+
+      const overColor = '#b87a1e';
+      const usedSeg = document.createElement('div');
+      usedSeg.className = 'bar-seg';
+      usedSeg.style.width = Math.min(pct, 100) + '%';
+      usedSeg.style.background = pct > 100 ? overColor : '#2f8f5b';
+      bar.appendChild(usedSeg);
+      if (pct < 100) {
+        const freeSeg = document.createElement('div');
+        freeSeg.className = 'bar-seg';
+        freeSeg.style.width = (100 - pct) + '%';
+        freeSeg.style.background = '#e2e4e9';
+        bar.appendChild(freeSeg);
+      }
+      legend.innerHTML =
+        `<span><span class="sw" style="background:${pct > 100 ? overColor : '#2f8f5b'}"></span>usado</span>` +
+        '<span><span class="sw" style="background:#e2e4e9"></span>livre até a cota informativa</span>';
+
+      log(`OK — usado=${fmtBytes(data.used_bytes)}, cota informativa=${fmtBytes(data.quota_bytes)} (${pct.toFixed(1)}%)${pct > 100 ? ' — acima do informativo, mas SeaweedFS não trava por isso' : ''}.`);
+    })
+    .catch(e => log(`FALHOU: ${e.message} — o proxy /api/quota está no ar? (precisa do server.py rodando, não o "python -m http.server" puro)`));
+}
+
+function saveQuota() {
+  const bucket = document.getElementById('bucket').value.trim();
+  if (!bucket) { log('ERRO: informe um bucket.'); return; }
+  const raw = document.getElementById('quotaMbInput').value.trim();
+  const quota_mb = raw === '' ? 0 : parseFloat(raw);
+  if (raw !== '' && (isNaN(quota_mb) || quota_mb < 0)) { log('ERRO: cota precisa ser um número positivo (ou vazio pra remover).'); return; }
+
+  log(`POST /api/quota — salvando cota informativa de ${bucket} = ${quota_mb || 'removida'} MB (só grava num arquivo local da demo, não mexe no SeaweedFS)...`);
+  fetch('/api/quota', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bucket, quota_mb }),
+  })
+    .then(r => r.json().then(data => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) { log(`FALHOU: ${data.error || 'erro desconhecido'}`); return; }
+      log(quota_mb ? `OK — cota informativa salva.` : `OK — cota informativa removida.`);
+      checkQuota();
+    })
+    .catch(e => log(`FALHOU: ${e.message}`));
+}
 </script>
 
 </body>
@@ -730,6 +851,167 @@ ENDHTML
 )
 UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
 UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
+
+UPLOAD_DEMO_SERVER_PY=$(cat <<'ENDPY'
+#!/usr/bin/env python3
+# Serve a página estática do demo e expõe /api/quota como proxy somente-leitura
+# para o /metrics (Prometheus) do gateway S3 local — nunca fala com weed shell
+# nem guarda credencial admin. Ver README/COMANDOS.md para o resto do contexto.
+#
+# A cota mostrada aqui é INFORMATIVA, guardada num arquivo local desta demo —
+# não é a s3.bucket.quota real do SeaweedFS. Isso é deliberado: a cota real
+# tem um loop de enforcement automático embutido no próprio weed s3
+# (bucket_size_metrics.go) que trava o bucket sozinho ao estourar, em ambas
+# as direções, sem flag pra desligar só o travamento mantendo o número visível.
+# Pra ter cota visível sem nenhum risco de lock, a alternativa é não configurar
+# quota real nenhuma e deixar essa demo acompanhar/exibir o número por conta
+# própria, comparando com bucket_size_bytes (que é sempre real, vem do SeaweedFS
+# independente de ter cota configurada ou não).
+import http.server
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+METRICS_URL = "http://127.0.0.1:9327/metrics"
+QUOTA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "informational_quotas.json")
+
+METRIC_NAMES = {
+    "SeaweedFS_s3_bucket_size_bytes": "used_bytes",
+    "SeaweedFS_s3_bucket_physical_size_bytes": "physical_size_bytes",
+    "SeaweedFS_s3_bucket_read_only": "read_only",
+    "SeaweedFS_s3_bucket_object_count": "object_count",
+}
+LINE_RE = re.compile(r'^(\w+)\{bucket="([^"]*)"\}\s+([0-9eE.+-]+)\s*$')
+
+
+def load_quotas():
+    try:
+        with open(QUOTA_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_quotas(data):
+    tmp = QUOTA_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+    os.replace(tmp, QUOTA_FILE)
+
+
+def fetch_bucket_metrics(bucket):
+    with urllib.request.urlopen(METRICS_URL, timeout=5) as resp:
+        text = resp.read().decode("utf-8", "replace")
+
+    values = {}
+    for line in text.splitlines():
+        m = LINE_RE.match(line)
+        if not m:
+            continue
+        metric, line_bucket, raw_value = m.groups()
+        if metric in METRIC_NAMES and line_bucket == bucket:
+            values[METRIC_NAMES[metric]] = float(raw_value)
+    return values
+
+
+def build_quota_response(bucket):
+    values = fetch_bucket_metrics(bucket)
+    used = values.get("used_bytes")
+
+    quotas = load_quotas()
+    quota_mb = quotas.get(bucket)
+    quota_bytes = quota_mb * 1024 * 1024 if quota_mb else None
+
+    return {
+        "bucket": bucket,
+        "used_bytes": used,
+        "physical_size_bytes": values.get("physical_size_bytes"),
+        "object_count": values.get("object_count"),
+        "has_quota": quota_bytes is not None,
+        "quota_bytes": quota_bytes,
+        "over_quota_bytes": (used - quota_bytes) if (used is not None and quota_bytes) else None,
+        "read_only": bool(values.get("read_only")),
+        "quota_source": "informational (guardada nesta demo, não é s3.bucket.quota real)",
+    }
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def _json(self, status, payload):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/api/quota":
+            return super().do_GET()
+
+        bucket = urllib.parse.parse_qs(parsed.query).get("bucket", [""])[0].strip()
+        if not bucket:
+            self._json(400, {"error": "informe ?bucket=<nome>"})
+            return
+        try:
+            self._json(200, build_quota_response(bucket))
+        except (urllib.error.URLError, OSError) as e:
+            self._json(502, {"error": f"não consegui ler {METRICS_URL}: {e}"})
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/api/quota":
+            self._json(404, {"error": "not found"})
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0 or length > 4096:
+            self._json(400, {"error": "corpo da requisição ausente ou grande demais"})
+            return
+        try:
+            body = json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self._json(400, {"error": "corpo inválido, esperado JSON"})
+            return
+
+        bucket = str(body.get("bucket", "")).strip()
+        if not bucket:
+            self._json(400, {"error": "informe 'bucket'"})
+            return
+
+        quota_mb = body.get("quota_mb", None)
+        quotas = load_quotas()
+        if quota_mb in (None, 0, "0", ""):
+            quotas.pop(bucket, None)
+        else:
+            try:
+                quota_mb = float(quota_mb)
+                if quota_mb <= 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                self._json(400, {"error": "quota_mb precisa ser um número positivo (ou vazio/0 para remover)"})
+                return
+            quotas[bucket] = quota_mb
+        save_quotas(quotas)
+
+        try:
+            self._json(200, build_quota_response(bucket))
+        except (urllib.error.URLError, OSError) as e:
+            self._json(502, {"error": f"cota salva, mas não consegui ler {METRICS_URL}: {e}"})
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+
+if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8090
+    http.server.HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+ENDPY
+)
 
 for vm in "${VM_NAMES[@]}"; do
     VM_DIR="$LAB_DIR/$vm"
@@ -996,23 +1278,29 @@ for vm in "${VM_NAMES[@]}"; do
 
     if [[ "$vm" == "$UPLOAD_DEMO_HOST" ]]; then
         UPLOAD_DEMO_HTML_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_HTML" | indent "      ")
+        UPLOAD_DEMO_SERVER_PY_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_SERVER_PY" | indent "      ")
         WEED_UNITS+="
   - path: /var/www/upload-demo/index.html
     permissions: '0644'
     content: |
 ${UPLOAD_DEMO_HTML_INDENTED}
 
+  - path: /var/www/upload-demo/server.py
+    permissions: '0644'
+    content: |
+${UPLOAD_DEMO_SERVER_PY_INDENTED}
+
   - path: /etc/systemd/system/weed-upload-demo.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=Pagina de demo de upload S3 (estatica, so para teste)
+      Description=Pagina de demo de upload S3 (estatica + proxy /api/quota, so para teste)
       After=network-online.target
       Wants=network-online.target
 
       [Service]
       WorkingDirectory=/var/www/upload-demo
-      ExecStart=/usr/bin/python3 -m http.server ${SEAWEED_UPLOAD_DEMO_PORT}
+      ExecStart=/usr/bin/python3 /var/www/upload-demo/server.py ${SEAWEED_UPLOAD_DEMO_PORT}
       Restart=on-failure
       RestartSec=5
 

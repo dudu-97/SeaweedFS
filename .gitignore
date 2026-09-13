@@ -21,3 +21,7 @@
 
 # Arquivos grandes gerados com dd para testes de carga/upload paralelo
 /FILES-TESTE/
+
+# Documentos pessoais de referência (não fazem parte do código/docs do lab)
+/DOC-IAM-REFERENCIA.md
+/DOC-IAM-REFERENCIA.pdf

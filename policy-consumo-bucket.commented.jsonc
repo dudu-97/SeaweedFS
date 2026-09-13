@@ -1,0 +1,119 @@
+// Versão comentada de policy-consumo-bucket.json, só pra leitura.
+// JSON não aceita comentário de verdade e o "weed shell" faz parse
+// estrito -- pra aplicar/testar, use sempre o .json ao lado deste,
+// sem comentário nenhum.
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "PermitirUsoNormalDoObjeto",
+      "Effect": "Allow",
+      "Action": [
+        // Baixar o conteúdo (bytes) de um objeto.
+        "s3:GetObject",
+        // Enviar/sobrescrever um objeto.
+        "s3:PutObject",
+        // Apagar um objeto (ou criar marcador de exclusão, se versionado).
+        // Object Lock ainda bloqueia se a versão atual tiver retenção ativa.
+        "s3:DeleteObject",
+        // Apagar uma versão específica de um objeto. Também barrado pelo
+        // Object Lock se essa versão tiver retenção/legal hold ativos --
+        // é o que permite ao client limpar só o que já expirou.
+        "s3:DeleteObjectVersion",
+        // Listar os objetos (versão atual) dentro do bucket.
+        "s3:ListBucket",
+        // Listar todas as versões de todos os objetos do bucket.
+        "s3:ListBucketVersions",
+        // Consultar a região do bucket -- vários SDKs chamam isso sozinhos
+        // ao inicializar o client, antes de qualquer operação real.
+        "s3:GetBucketLocation",
+        // Ler se o versionamento do bucket está ligado ou suspenso.
+        "s3:GetBucketVersioning",
+        // Ler a configuração padrão de Object Lock do bucket.
+        "s3:GetBucketObjectLockConfiguration",
+        // Ler o prazo/modo de retenção (Object Lock) de um objeto.
+        "s3:GetObjectRetention",
+        // Definir o prazo/modo de retenção de um objeto -- é o que deixa o
+        // próprio client de backup marcar imutabilidade na hora do upload.
+        "s3:PutObjectRetention",
+        // Ler o estado de legal hold de um objeto.
+        "s3:GetObjectLegalHold",
+        // Ler as tags do bucket.
+        "s3:GetBucketTagging",
+        // Ler as tags de um objeto.
+        "s3:GetObjectTagging",
+        // Definir as tags de um objeto.
+        "s3:PutObjectTagging"
+      ],
+      "Resource": [
+        "arn:aws:s3:::c00001-ansata",
+        "arn:aws:s3:::c00001-ansata/*"
+      ]
+    },
+    {
+      "Sid": "PermitirMultipartUpload",
+      "Effect": "Allow",
+      "Action": [
+        // Iniciar um upload multipart (necessário pra arquivo grande --
+        // s3:PutObject sozinho só cobre upload em 1 PUT só).
+        "s3:CreateMultipartUpload",
+        // Enviar uma parte de um upload multipart em andamento.
+        "s3:UploadPart",
+        // Finalizar e montar um upload multipart.
+        "s3:CompleteMultipartUpload",
+        // Cancelar um upload multipart em andamento.
+        "s3:AbortMultipartUpload",
+        // Listar uploads multipart em andamento no bucket.
+        "s3:ListMultipartUploads",
+        // Listar as partes já enviadas de um upload multipart.
+        "s3:ListParts"
+      ],
+      "Resource": [
+        "arn:aws:s3:::c00001-ansata",
+        "arn:aws:s3:::c00001-ansata/*"
+      ]
+    },
+    {
+      "Sid": "BloquearRemocaoDoBucket",
+      "Effect": "Deny",
+      // Apagar o bucket inteiro -- bloqueado por pedido explícito seu
+      // (item 1: "não quero que remova o bucket").
+      "Action": "s3:DeleteBucket",
+      "Resource": "arn:aws:s3:::c00001-ansata"
+    },
+    {
+      "Sid": "BloquearAlteracaoDeVersionamento",
+      "Effect": "Deny",
+      // Ligar/suspender o versionamento do bucket -- bloqueado por pedido
+      // explícito seu (item 2: "não quero que altere versionamento").
+      "Action": "s3:PutBucketVersioning",
+      "Resource": "arn:aws:s3:::c00001-ansata"
+    },
+    {
+      "Sid": "BloquearAlteracaoDoObjectLock",
+      "Effect": "Deny",
+      // Mudar a configuração padrão de Object Lock do bucket -- impede
+      // enfraquecer a proteção depois que ela já foi definida na criação.
+      "Action": "s3:PutBucketObjectLockConfiguration",
+      "Resource": "arn:aws:s3:::c00001-ansata"
+    },
+    {
+      "Sid": "BloquearBypassGovernance",
+      "Effect": "Deny",
+      // Ignorar retenção em modo Governance -- bloqueado por pedido
+      // explícito seu (item 3: "não quero que limpe dado com governança").
+      // Compliance já é imune a isso pra qualquer permissão, estruturalmente.
+      "Action": "s3:BypassGovernanceRetention",
+      "Resource": "arn:aws:s3:::c00001-ansata/*"
+    },
+    {
+      "Sid": "BloquearRemocaoDeLegalHold",
+      "Effect": "Deny",
+      // Ativar OU remover legal hold de um objeto -- é a mesma ação nos
+      // dois sentidos (não existe "RemoveLegalHold" separado). Negada pra
+      // ninguém conseguir remover uma proteção que já foi colocada.
+      "Action": "s3:PutObjectLegalHold",
+      "Resource": "arn:aws:s3:::c00001-ansata/*"
+    }
+  ]
+}
