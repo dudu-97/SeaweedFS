@@ -57,7 +57,7 @@ for vm in "${VM_NAMES[@]}"; do
         done
     fi
     $IS_S3FRONT && CHECKS+=("${SEAWEED_S3_PORT}:/:s3")
-    [[ "$vm" == "$ADMIN_HOST" ]] && CHECKS+=("${SEAWEED_ADMIN_PORT}:/:admin")
+    [[ "$vm" == "$ADMIN_HOST" ]] && CHECKS+=("${SEAWEED_ADMIN_PORT}:/login:admin")
     [[ "$vm" == "$UPLOAD_DEMO_HOST" ]] && CHECKS+=("${SEAWEED_UPLOAD_DEMO_PORT}:/:upload-demo")
 
     # papéis sem HTTP (postgres, worker) -- checados via systemd, não curl

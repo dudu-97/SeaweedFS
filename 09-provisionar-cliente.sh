@@ -14,13 +14,14 @@
 # Hoje é 1 cliente por execução (menu -> resumo -> aplicar). Provisionar
 # em massa (ex.: ler a tabela de clientes de um CSV) fica para depois.
 #
-# Segurança: no estado atual do lab, `weed admin` sobe sem
-# -adminUser/-adminPassword (ver 04-gerar-cloud-init.sh) -- a API fica
-# sem autenticação e em HTTP puro (sem TLS). Isso é aceitável pra um
-# lab isolado, mas este script está lidando com credenciais AWS reais
-# de clientes migrando -- antes de repetir esse processo em produção,
-# vale configurar autenticação no `weed admin` e considerar TLS na
-# frente dele (ex.: reverse proxy).
+# Autenticação: o `weed admin` (4.47) só aceita conexões fora do loopback
+# com senha (-adminPassword, ver ADMIN_USER/ADMIN_PASSWORD no 00-config.env).
+# A API usa sessão por cookie + token CSRF: este script faz o login do
+# formulário (GET /login -> POST /login), guarda o cookie e manda o token
+# em X-CSRF-Token nas escritas. É HTTP puro (sem TLS) -- aceitável só num
+# lab isolado; este script lida com credenciais AWS reais de clientes
+# migrando, então antes de repetir isso em produção, coloque TLS na frente
+# do `weed admin` (ex.: reverse proxy).
 # =====================================================================
 set -euo pipefail
 
@@ -28,9 +29,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/00-config.env"
 
 ADMIN_IP="${VM_IP[$ADMIN_HOST]}"
-BASE_URL="http://${ADMIN_IP}:${SEAWEED_ADMIN_PORT}/api"
+ADMIN_ROOT="http://${ADMIN_IP}:${SEAWEED_ADMIN_PORT}"
+BASE_URL="${ADMIN_ROOT}/api"
 RESP_TMP="$(mktemp)"
-trap 'rm -f "$RESP_TMP"' EXIT
+COOKIE_JAR="$(mktemp)"
+CSRF_TOKEN=""
+trap 'rm -f "$RESP_TMP" "$COOKIE_JAR"' EXIT
 
 # --- helpers -----------------------------------------------------------
 
@@ -39,10 +43,12 @@ call_api() {
     local method="$1" path="$2" body="${3:-}"
     if [[ -n "$body" ]]; then
         curl -sS -o "$RESP_TMP" -w '%{http_code}' -X "$method" \
+            -b "$COOKIE_JAR" -H "X-CSRF-Token: $CSRF_TOKEN" \
             -H 'Content-Type: application/json' \
             --data-binary @- "$BASE_URL$path" <<<"$body"
     else
-        curl -sS -o "$RESP_TMP" -w '%{http_code}' -X "$method" "$BASE_URL$path"
+        curl -sS -o "$RESP_TMP" -w '%{http_code}' -X "$method" \
+            -b "$COOKIE_JAR" -H "X-CSRF-Token: $CSRF_TOKEN" "$BASE_URL$path"
     fi
 }
 
@@ -64,12 +70,29 @@ apply_step() {
     fi
 }
 
-# --- checagem de conectividade -----------------------------------------
+# --- checagem de conectividade + login ----------------------------------
 
-if ! curl -sS -o /dev/null -m 5 "$BASE_URL/config" 2>/dev/null; then
-    echo "Não consegui alcançar o weed admin em ${BASE_URL}."
+if ! curl -sS -o /dev/null -m 5 "${ADMIN_ROOT}/login" 2>/dev/null; then
+    echo "Não consegui alcançar o weed admin em ${ADMIN_ROOT}."
     echo "Confirme que ${ADMIN_HOST} (${ADMIN_IP}) está de pé e que o host"
     echo "tem rota até a rede do lab (veja 06-status.sh)."
+    exit 1
+fi
+
+LOGIN_TOKEN=$(curl -sS -m 10 -c "$COOKIE_JAR" "${ADMIN_ROOT}/login" \
+    | grep -o 'name="csrf_token" value="[^"]*"' | sed 's/.*value="//; s/"$//')
+LOGIN_REDIRECT=$(curl -sS -m 10 -b "$COOKIE_JAR" -c "$COOKIE_JAR" -o /dev/null -w '%{redirect_url}' \
+    --data-urlencode "username=${ADMIN_USER}" --data-urlencode "password=${ADMIN_PASSWORD}" \
+    --data-urlencode "csrf_token=${LOGIN_TOKEN}" "${ADMIN_ROOT}/login")
+if [[ "$LOGIN_REDIRECT" != */admin ]]; then
+    echo "Login no weed admin falhou (usuário '${ADMIN_USER}'). Confira ADMIN_USER/ADMIN_PASSWORD"
+    echo "no 00-config.env e se o weed-admin foi iniciado com a mesma senha."
+    exit 1
+fi
+CSRF_TOKEN=$(curl -sS -m 10 -b "$COOKIE_JAR" -c "$COOKIE_JAR" "${ADMIN_ROOT}/admin" \
+    | grep -o 'name="csrf-token" content="[^"]*"' | sed 's/.*content="//; s/"$//')
+if [[ -z "$CSRF_TOKEN" ]]; then
+    echo "Login ok, mas não consegui obter o token CSRF do weed admin."
     exit 1
 fi
 

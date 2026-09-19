@@ -189,6 +189,7 @@ dentro da própria VM** (evita depender de rota do host) e reporta o código:
 | swfs-s3front1 | S3 API | 8333 | 403 sem credenciais (esperado, ver abaixo) |
 | swfs-s3front1 | métricas S3 (Prometheus) | 9327 | `/metrics` |
 | swfs-s3front1 | página de demo de upload S3 | 8090 | HTTP 200 |
+| swfs-s3front1 | `/admin.html` — página web pra criar usuário/bucket/permissões (usa a API do weed admin; HTTP Basic com `ADMIN_USER`/`ADMIN_PASSWORD`) | 8090 | HTTP 401 sem senha, 200 com |
 | swfs-pgsql01 | PostgreSQL | 5432 | `systemctl is-active postgresql` |
 | swfs-node01..07 | volume (1 processo, 8 discos) | 8080 | `/status` → HTTP 200 |
 

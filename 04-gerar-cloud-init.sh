@@ -47,7 +47,21 @@ log "Gerador de seed ISO: $SEED_TOOL"
 # trial padrão automático (abaixo de 25TB é livre de licença; a única
 # limitação é a janela de retenção do Data Recovery, 1h no trial).
 if [[ "$SEAWEED_VERSION" == "latest" ]]; then
-    SEAWEED_DOWNLOAD_URL="https://github.com/${SEAWEED_ENTERPRISE_REPO}/releases/latest/download/${SEAWEED_ENTERPRISE_ASSET}"
+    # NÃO usa /releases/latest/download: o repo de artefatos publica também
+    # releases de outros produtos (ex.: vfs-0.2.x, sem o binário weed), e o
+    # "latest" do GitHub pode cair numa delas -> 404 e VMs sem o weed.
+    # Em vez disso, acha a release mais recente que realmente tem o asset.
+    SEAWEED_RESOLVED_TAG="$(curl -fsSL -m 20 "https://api.github.com/repos/${SEAWEED_ENTERPRISE_REPO}/releases?per_page=30" 2>/dev/null \
+        | ASSET="$SEAWEED_ENTERPRISE_ASSET" python3 -c '
+import json, os, sys
+asset = os.environ["ASSET"]
+for r in json.load(sys.stdin):
+    if not r.get("draft") and not r.get("prerelease") and any(a["name"] == asset for a in r.get("assets", [])):
+        print(r["tag_name"]); break
+' 2>/dev/null || true)"
+    [[ -n "$SEAWEED_RESOLVED_TAG" ]] || die "Não consegui descobrir a release mais recente com o asset ${SEAWEED_ENTERPRISE_ASSET} em ${SEAWEED_ENTERPRISE_REPO} (API do GitHub fora do ar ou limite de requisições). Fixe SEAWEED_VERSION no 00-config.env (ex.: \"4.47\") e rode de novo."
+    log "SeaweedFS Enterprise: 'latest' resolvido para a release ${SEAWEED_RESOLVED_TAG}"
+    SEAWEED_DOWNLOAD_URL="https://github.com/${SEAWEED_ENTERPRISE_REPO}/releases/download/${SEAWEED_RESOLVED_TAG}/${SEAWEED_ENTERPRISE_ASSET}"
 else
     SEAWEED_DOWNLOAD_URL="https://github.com/${SEAWEED_ENTERPRISE_REPO}/releases/download/${SEAWEED_VERSION}/${SEAWEED_ENTERPRISE_ASSET}"
 fi
@@ -830,6 +844,690 @@ ENDHTML
 UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_ACCESS_KEY__/$S3_ACCESS_KEY}"
 UPLOAD_DEMO_HTML="${UPLOAD_DEMO_HTML//__S3_SECRET_KEY__/$S3_SECRET_KEY}"
 
+# --- rotina periodica de EC (cron no $ADMIN_HOST, ver EC_CRON_* no 00-config.env)
+EC_ROTINA_SH=$(cat <<'ENDECROTINA'
+#!/bin/bash
+# swfs-ec-rotina.sh -- rotina periodica de Erasure Coding, chamada pelo cron
+# (/etc/cron.d/swfs-ec) no master que hospeda o weed-admin. Faz o mesmo que
+# a operacao manual no weed shell:
+#   1) ec.encode: converte em EC os volumes cheios (>= EC_FULL_PERCENT) e sem
+#      escrita ha EC_QUIET_FOR, em todas as colecoes (buckets);
+#   2) ec.balance: reequilibra os shards EC entre os servidores.
+# EC_FULL_PERCENT / EC_QUIET_FOR vem do cron.d (ou dos defaults abaixo).
+MASTER="${SEAWEED_MASTER:-localhost:9333}"
+FULL="${EC_FULL_PERCENT:-95}"
+QUIET="${EC_QUIET_FOR:-1h}"
+
+echo "=== $(date '+%F %T') rotina de EC (fullPercent=$FULL quietFor=$QUIET) ==="
+weed shell -master="$MASTER" <<CMDS 2>&1
+lock
+ec.encode -collection=*,_default -fullPercent=$FULL -quietFor=$QUIET -verbose
+ec.balance -apply
+unlock
+CMDS
+echo "=== $(date '+%F %T') fim (weed shell exit $?) ==="
+ENDECROTINA
+)
+
+# --- página web de administração (criar usuário/bucket/permissões), servida
+# em $UPLOAD_DEMO_HOST junto do demo de upload, em /admin.html. Fala com a API
+# do weed admin via server.py (que faz o login com ADMIN_USER/ADMIN_PASSWORD)
+# e é protegida por HTTP Basic com a mesma credencial. Heredoc quotado pelo
+# mesmo motivo do UPLOAD_DEMO_HTML acima (JS com template literals).
+UPLOAD_DEMO_ADMIN_HTML=$(cat <<'ENDADMINHTML'
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>Administração — SeaweedFS</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --border: #e2e4e9;
+    --text: #1a1c22;
+    --text-dim: #6b7078;
+    --accent: #2f5fd6;
+    --accent-dim: #eaf0fd;
+    --ok: #1f8a4c;
+    --warn-bg: #fff6e0;
+    --warn-border: #f0d896;
+    --danger: #c23b3b;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 28px 20px 60px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 1.35rem; margin: 0; }
+  .subtitle { font-size: 0.85rem; color: var(--text-dim); margin: 4px 0 18px; }
+
+  .warn { background: var(--warn-bg); border: 1px solid var(--warn-border); padding: 10px 14px; border-radius: var(--radius); font-size: 0.82rem; margin-bottom: 18px; color: #6b5410; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px; }
+  .card h2 { font-size: 0.95rem; margin: 0 0 12px; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px 14px; align-items: end; }
+  label { display: block; font-size: 0.78rem; color: var(--text-dim); margin-bottom: 4px; }
+  input[type=text], input[type=password], input[type=number], input[type=date], select {
+    width: 100%; padding: 7px 9px; font-size: 0.85rem; font-family: monospace;
+    border: 1px solid var(--border); border-radius: 6px; background: #fbfbfc; color: var(--text);
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent); }
+  .check-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 10px; }
+  .check-row input[type=checkbox] { width: auto; }
+  .check-row label { margin: 0; font-size: 0.85rem; color: var(--text); }
+
+  fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 10px 0 0; }
+  fieldset[disabled] { opacity: 0.5; }
+  legend { font-size: 0.78rem; color: var(--text-dim); padding: 0 4px; }
+
+  button {
+    padding: 8px 16px; font-size: 0.85rem; cursor: pointer;
+    border: 1px solid var(--accent); background: var(--accent); color: #fff;
+    border-radius: 6px; font-weight: 500;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 4px; font-size: 0.83rem; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-dim); font-weight: 500; }
+
+  .not-shown { background: #f5f5f5; border: 1px dashed #bbb; border-radius: 8px; color: #555; }
+
+  .steps { margin-top: 10px; font-size: 0.83rem; }
+  .step { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .step .badge { flex: 0 0 60px; font-weight: 600; }
+  .step.ok .badge { color: var(--ok); }
+  .step.fail .badge { color: var(--danger); }
+  .step .detail { color: var(--text-dim); font-family: monospace; font-size: 0.76rem; white-space: pre-wrap; word-break: break-all; }
+
+  #summaryCard, #resultCard { display: none; }
+
+  nav.tabs { display: flex; gap: 6px; margin: 0 0 14px; flex-wrap: wrap; }
+  nav.tabs button {
+    background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 16px; font-weight: 500;
+  }
+  nav.tabs button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  .perm-tag {
+    display: inline-flex; align-items: center; gap: 4px; background: var(--accent-dim); color: var(--accent);
+    border-radius: 999px; padding: 3px 6px 3px 10px; font-size: 0.76rem; margin: 2px 4px 2px 0;
+  }
+  .perm-tag button { all: unset; cursor: pointer; font-weight: 700; padding: 0 4px; line-height: 1; }
+  .perm-tag button:hover { color: var(--danger); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Administração — SeaweedFS</h1>
+<div class="subtitle">Página de teste do administrador — não é linkada do demo de upload, cliente nenhum vê isto.</div>
+
+<div class="warn">
+  <strong>Só para teste manual.</strong> Este servidor Python chama diretamente a API do <code>weed admin</code>
+  (<span id="adminBaseLabel">carregando…</span>). Sem autenticação nesta página nem no <code>weed admin</code> hoje —
+  não exponha esta porta fora do lab. Access key/secret key nunca são exibidas aqui, só do lado do próprio weed admin.
+</div>
+
+<nav class="tabs">
+  <button class="active" onclick="switchTab('provision')" id="tabbtn-provision">Provisionar</button>
+  <button onclick="switchTab('iam')" id="tabbtn-iam">Permissões (IAM)</button>
+</nav>
+
+<div class="tab-panel active" id="tab-provision">
+
+<div class="card" id="formCard">
+  <h2>1. Usuário (opcional)</h2>
+  <div class="grid">
+    <div>
+      <label>Nome do usuário</label>
+      <input type="text" id="userName" placeholder="nome-do-usuario" autocomplete="off">
+    </div>
+  </div>
+
+  <div class="check-row" style="margin-top:14px;">
+    <input type="checkbox" id="generateKey" onchange="toggleKeyMode()">
+    <label for="generateKey">Gerar access key/secret automaticamente (em vez de migrar a chave da AWS)</label>
+  </div>
+  <div class="grid" id="manualKeyFields" style="margin-top:6px;">
+    <div>
+      <label>Access Key ID (da AWS)</label>
+      <input type="text" id="accessKey" placeholder="AKIA..." autocomplete="off">
+    </div>
+    <div>
+      <label>Secret Access Key (da AWS)</label>
+      <input type="password" id="secretKey" placeholder="••••••••••••••••••••••••••••••••••••••" autocomplete="new-password">
+    </div>
+  </div>
+
+  <h2 style="margin-top:22px;">2. Bucket (opcional)</h2>
+  <div class="grid">
+    <div>
+      <label>Nome do bucket</label>
+      <input type="text" id="bucketName" placeholder="nome-do-bucket" autocomplete="off">
+    </div>
+  </div>
+
+  <div class="check-row" style="margin-top:14px;">
+    <input type="checkbox" id="linkOwner">
+    <label for="linkOwner">Tornar o usuário acima admin deste bucket (preenche o owner + permissão Admin)</label>
+  </div>
+
+  <div class="check-row" style="margin-top:10px;">
+    <input type="checkbox" id="versioningEnabled" onchange="onVersioningToggle()">
+    <label for="versioningEnabled">Ativar versionamento no bucket</label>
+  </div>
+
+  <div class="check-row" style="margin-top:4px;">
+    <input type="checkbox" id="lockEnabled" onchange="toggleLockFields()">
+    <label for="lockEnabled">Ativar Object Lock no bucket</label>
+  </div>
+  <fieldset id="lockFields" disabled>
+    <legend>Object Lock</legend>
+    <div class="grid">
+      <div>
+        <label>Modo</label>
+        <select id="lockMode">
+          <option value="GOVERNANCE">GOVERNANCE</option>
+          <option value="COMPLIANCE">COMPLIANCE</option>
+        </select>
+      </div>
+    </div>
+    <div class="check-row" style="margin-top:10px;">
+      <input type="checkbox" id="setDefaultRetention" onchange="toggleDefaultRetentionFields()">
+      <label for="setDefaultRetention">Definir retenção padrão automática (aplica a todo objeto novo)</label>
+    </div>
+    <div class="grid" id="defaultRetentionFields" style="display:none;">
+      <div>
+        <label>Dias de retenção padrão</label>
+        <input type="number" id="lockDays" min="1" value="30">
+      </div>
+    </div>
+    <div class="not-shown" style="margin-top:8px; font-size:0.78rem; padding:8px 10px;">
+      Sem retenção padrão, o Object Lock fica disponível no bucket mas cada
+      objeto só é travado se quem enviar (ex: Veeam) mandar a própria data de
+      retenção no PUT — é o caso normal de imutabilidade em backup.
+    </div>
+  </fieldset>
+
+  <div class="check-row" style="margin-top:14px;">
+    <input type="checkbox" id="lifecycleEnabled" onchange="toggleLifecycleFields()">
+    <label for="lifecycleEnabled">Adicionar regra de lifecycle a este bucket</label>
+  </div>
+  <fieldset id="lifecycleFields" disabled>
+    <legend>Ações (mesmas do editor nativo do weed admin)</legend>
+
+    <div class="check-row">
+      <input type="checkbox" id="actExpireDays" onchange="document.getElementById('expireDaysVal').disabled=!this.checked">
+      <label for="actExpireDays">Expirar após</label>
+      <input type="number" id="expireDaysVal" min="1" style="max-width:90px;" disabled>
+      <span>dias</span>
+    </div>
+
+    <div class="check-row">
+      <input type="checkbox" id="actExpireDate" onchange="document.getElementById('expireDateVal').disabled=!this.checked">
+      <label for="actExpireDate">Expirar na data</label>
+      <input type="date" id="expireDateVal" style="max-width:170px;" disabled>
+    </div>
+
+    <div class="check-row">
+      <input type="checkbox" id="actDeleteMarker">
+      <label for="actDeleteMarker">Remover marcadores de exclusão expirados (delete markers)</label>
+    </div>
+
+    <div class="check-row">
+      <input type="checkbox" id="actNoncurrent" onchange="document.getElementById('noncurrentDaysVal').disabled=document.getElementById('noncurrentKeepVal').disabled=!this.checked">
+      <label for="actNoncurrent">Limitar versões não-correntes</label>
+    </div>
+    <div class="grid" style="margin-left:26px; max-width:420px;">
+      <div>
+        <label>após (dias, opcional)</label>
+        <input type="number" id="noncurrentDaysVal" min="0" disabled>
+      </div>
+      <div>
+        <label>manter (mais recentes, opcional)</label>
+        <input type="number" id="noncurrentKeepVal" min="0" value="2" disabled>
+      </div>
+    </div>
+
+    <div class="check-row" style="margin-top:10px;">
+      <input type="checkbox" id="actAbortMultipart" onchange="document.getElementById('abortDaysVal').disabled=!this.checked">
+      <label for="actAbortMultipart">Abortar multipart incompletos após</label>
+      <input type="number" id="abortDaysVal" min="1" style="max-width:90px;" disabled>
+      <span>dias</span>
+    </div>
+  </fieldset>
+
+  <div class="check-row" style="margin-top:14px;">
+    <input type="checkbox" id="quotaEnabled" onchange="toggleQuotaFields()">
+    <label for="quotaEnabled">Definir cota do bucket</label>
+  </div>
+  <fieldset id="quotaFields" disabled>
+    <legend>Cota</legend>
+    <div class="grid">
+      <div>
+        <label>Tamanho</label>
+        <input type="number" id="quotaSize" min="1" value="100">
+      </div>
+      <div>
+        <label>Unidade</label>
+        <select id="quotaUnit">
+          <option>MB</option>
+          <option selected>GB</option>
+          <option>TB</option>
+        </select>
+      </div>
+    </div>
+  </fieldset>
+
+  <div style="margin-top:16px; display:flex; gap:10px;">
+    <button onclick="showSummary()">Ver resumo</button>
+  </div>
+</div>
+
+<div class="card" id="summaryCard">
+  <h2>3. Resumo — confira antes de aplicar</h2>
+  <table id="summaryTable"></table>
+  <div style="margin-top:14px; display:flex; gap:10px;">
+    <button class="secondary" onclick="backToForm()">Voltar e editar</button>
+    <button id="applyBtn" onclick="apply()">Aplicar</button>
+  </div>
+</div>
+
+<div class="card" id="resultCard">
+  <h2>4. Resultado</h2>
+  <div id="steps" class="steps"></div>
+  <div style="margin-top:14px;">
+    <button class="secondary" onclick="location.reload()">Provisionar outro</button>
+  </div>
+</div>
+
+</div>
+
+<div class="tab-panel" id="tab-iam">
+  <div class="card">
+    <h2>Permissões por bucket (IAM)</h2>
+    <div class="subtitle" style="margin:0 0 12px;">Mesma ideia da tela de permissões do weed admin: cada usuário tem uma lista de ações no formato <code>Ação:bucket</code> (ou só <code>Ação</code>, sem bucket, pra valer em todos).</div>
+
+    <div class="grid">
+      <div>
+        <label>Usuário</label>
+        <select id="iamUser"></select>
+      </div>
+      <div>
+        <label>Bucket</label>
+        <select id="iamBucket">
+          <option value="">* (todos os buckets)</option>
+        </select>
+      </div>
+      <div>
+        <label>Ação</label>
+        <select id="iamAction">
+          <option>Admin</option>
+          <option>Read</option>
+          <option>Write</option>
+          <option>List</option>
+          <option>Tagging</option>
+        </select>
+      </div>
+      <div>
+        <button onclick="grantPermission()">Conceder</button>
+      </div>
+    </div>
+    <div id="iamStatus" style="margin-top:8px; font-size:0.82rem; color:var(--text-dim);"></div>
+
+    <table style="margin-top:16px;">
+      <thead><tr><th style="width:28%;">Usuário</th><th>Permissões</th></tr></thead>
+      <tbody id="iamTableBody"><tr><td colspan="2">Carregando…</td></tr></tbody>
+    </table>
+    <div style="margin-top:12px;">
+      <button class="secondary" onclick="loadIamData()">Recarregar</button>
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+const adminBaseLabel = document.getElementById('adminBaseLabel');
+// só decorativo -- o próprio servidor sabe o endereço real do weed admin,
+// isto aqui é pra deixar claro na tela pra onde a chamada vai.
+adminBaseLabel.textContent = location.hostname + ' -> weed admin (ver ADMIN_API_BASE em server.py)';
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('nav.tabs button').forEach(el => el.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  document.getElementById('tabbtn-' + name).classList.add('active');
+  if (name === 'iam') loadIamData();
+}
+
+function toggleKeyMode() {
+  const generating = document.getElementById('generateKey').checked;
+  document.getElementById('manualKeyFields').style.display = generating ? 'none' : 'grid';
+  document.getElementById('accessKey').disabled = generating;
+  document.getElementById('secretKey').disabled = generating;
+}
+
+function onVersioningToggle() {
+  // só reflete o estado do checkbox -- a trava de "obrigatório com lock"
+  // é aplicada em toggleLockFields(), que roda depois se o Object Lock
+  // também estiver marcado.
+}
+
+function toggleLockFields() {
+  const on = document.getElementById('lockEnabled').checked;
+  document.getElementById('lockFields').disabled = !on;
+  const versioningCb = document.getElementById('versioningEnabled');
+  if (on) {
+    // Mesma regra do SeaweedFS/S3: Object Lock exige versionamento --
+    // liga e trava o checkbox pra não dar pra desligar enquanto o lock
+    // estiver ativo.
+    versioningCb.checked = true;
+    versioningCb.disabled = true;
+  } else {
+    versioningCb.disabled = false;
+    document.getElementById('setDefaultRetention').checked = false;
+    toggleDefaultRetentionFields();
+  }
+}
+function toggleDefaultRetentionFields() {
+  document.getElementById('defaultRetentionFields').style.display =
+    document.getElementById('setDefaultRetention').checked ? 'grid' : 'none';
+}
+function toggleLifecycleFields() {
+  document.getElementById('lifecycleFields').disabled = !document.getElementById('lifecycleEnabled').checked;
+}
+function toggleQuotaFields() {
+  document.getElementById('quotaFields').disabled = !document.getElementById('quotaEnabled').checked;
+}
+
+function buildLifecycleRule() {
+  if (!document.getElementById('lifecycleEnabled').checked) return null;
+  const rule = {};
+  if (document.getElementById('actExpireDays').checked) {
+    rule.expiration_days = parseInt(document.getElementById('expireDaysVal').value || '0', 10);
+  }
+  if (document.getElementById('actExpireDate').checked) {
+    rule.expiration_date = document.getElementById('expireDateVal').value;
+  }
+  if (document.getElementById('actDeleteMarker').checked) {
+    rule.expired_object_delete_marker = true;
+  }
+  if (document.getElementById('actNoncurrent').checked) {
+    const days = parseInt(document.getElementById('noncurrentDaysVal').value || '0', 10);
+    const keep = parseInt(document.getElementById('noncurrentKeepVal').value || '0', 10);
+    if (days > 0) rule.noncurrent_version_expiration_days = days;
+    if (keep > 0) rule.newer_noncurrent_versions = keep;
+  }
+  if (document.getElementById('actAbortMultipart').checked) {
+    rule.abort_multipart_days = parseInt(document.getElementById('abortDaysVal').value || '0', 10);
+  }
+  return Object.keys(rule).length ? rule : null;
+}
+
+function describeLifecycleRule(rule) {
+  if (!rule) return 'nenhuma';
+  const parts = [];
+  if (rule.expiration_days) parts.push('expira objetos após ' + rule.expiration_days + ' dia(s)');
+  if (rule.expiration_date) parts.push('expira objetos em ' + rule.expiration_date);
+  if (rule.expired_object_delete_marker) parts.push('remove delete markers expirados');
+  if (rule.noncurrent_version_expiration_days) parts.push('expira não-correntes após ' + rule.noncurrent_version_expiration_days + ' dia(s)');
+  if (rule.newer_noncurrent_versions) parts.push('mantém ' + rule.newer_noncurrent_versions + ' não-corrente(s)');
+  if (rule.abort_multipart_days) parts.push('aborta multipart após ' + rule.abort_multipart_days + ' dia(s)');
+  return parts.join('; ') || 'regra vazia';
+}
+
+function readConfig() {
+  return {
+    user_name: document.getElementById('userName').value.trim(),
+    generate_key: document.getElementById('generateKey').checked,
+    access_key: document.getElementById('accessKey').value.trim(),
+    secret_key: document.getElementById('secretKey').value,
+    bucket_name: document.getElementById('bucketName').value.trim(),
+    link_owner: document.getElementById('linkOwner').checked,
+    versioning_enabled: document.getElementById('versioningEnabled').checked,
+    object_lock_enabled: document.getElementById('lockEnabled').checked,
+    object_lock_mode: document.getElementById('lockMode').value,
+    set_default_retention: document.getElementById('setDefaultRetention').checked,
+    object_lock_days: parseInt(document.getElementById('lockDays').value || '0', 10),
+    lifecycle_rule: buildLifecycleRule(),
+    quota_enabled: document.getElementById('quotaEnabled').checked,
+    quota_size: parseInt(document.getElementById('quotaSize').value || '0', 10),
+    quota_unit: document.getElementById('quotaUnit').value,
+  };
+}
+
+function showSummary() {
+  const cfg = readConfig();
+  if (!cfg.user_name && !cfg.bucket_name) {
+    alert('Preencha o nome do usuário e/ou do bucket -- pelo menos um dos dois.');
+    return;
+  }
+  if (cfg.user_name && !cfg.generate_key && (!cfg.access_key || !cfg.secret_key)) {
+    alert('Informe access key e secret key do usuário, ou marque "gerar automaticamente".');
+    return;
+  }
+  if (cfg.link_owner && !(cfg.user_name && cfg.bucket_name)) {
+    alert('Pra vincular como admin, preencha usuário E bucket.');
+    return;
+  }
+  if (cfg.set_default_retention && !(cfg.object_lock_days > 0)) {
+    alert('Informe dias de retenção > 0 para a retenção padrão.');
+    return;
+  }
+  if (cfg.lifecycle_rule && cfg.lifecycle_rule.newer_noncurrent_versions && !cfg.versioning_enabled) {
+    alert('"Limitar versões não-correntes" precisa de versionamento ativado.');
+    return;
+  }
+  window._provisionCfg = cfg;
+
+  const rows = [];
+  if (cfg.user_name) {
+    rows.push(['Usuário', cfg.user_name]);
+    rows.push(['Credencial', cfg.generate_key
+      ? 'gerada automaticamente pelo SeaweedFS (consulte no weed admin depois)'
+      : 'informada — Access Key ' + cfg.access_key + ', Secret (oculto — ' + cfg.secret_key.length + ' caracteres)']);
+  }
+  if (cfg.bucket_name) {
+    rows.push(['Bucket', cfg.bucket_name]);
+    rows.push(['Owner do bucket', cfg.link_owner ? cfg.user_name + ' (admin)' : 'nenhum']);
+    const lockDesc = !cfg.object_lock_enabled
+      ? 'desativado'
+      : cfg.object_lock_mode + (cfg.set_default_retention
+          ? ', retenção padrão de ' + cfg.object_lock_days + ' dia(s) em todo objeto novo'
+          : ', sem retenção padrão — cada objeto só trava se quem enviar pedir (ex: Veeam)');
+    rows.push(['Versionamento', cfg.versioning_enabled
+      ? (cfg.object_lock_enabled ? 'ativado (obrigatório com Object Lock)' : 'ativado')
+      : 'desativado']);
+    rows.push(['Object Lock', lockDesc]);
+    rows.push(['Lifecycle', describeLifecycleRule(cfg.lifecycle_rule)]);
+    rows.push(['Cota', cfg.quota_enabled ? (cfg.quota_size + cfg.quota_unit) : 'sem cota']);
+  }
+  rows.push(['Ordem de aplicação', (function() {
+    const steps = [];
+    if (cfg.user_name) {
+      steps.push('criar usuário' + (cfg.generate_key ? ' (já com chave gerada)' : ''));
+      if (!cfg.generate_key) steps.push('anexar chave');
+    }
+    if (cfg.bucket_name) {
+      steps.push('criar bucket' + (cfg.link_owner ? ' (owner=' + cfg.user_name + ')' : ''));
+      if (cfg.lifecycle_rule) steps.push('lifecycle');
+    }
+    return steps.map((s, i) => (i + 1) + ') ' + s).join('  ');
+  })()]);
+
+  document.getElementById('summaryTable').innerHTML = rows.map(([k, v]) =>
+    '<tr><th>' + k + '</th><td>' + v + '</td></tr>'
+  ).join('');
+
+  document.getElementById('formCard').style.display = 'none';
+  document.getElementById('summaryCard').style.display = 'block';
+}
+
+function backToForm() {
+  document.getElementById('summaryCard').style.display = 'none';
+  document.getElementById('formCard').style.display = 'block';
+}
+
+async function apply() {
+  const btn = document.getElementById('applyBtn');
+  btn.disabled = true;
+  btn.textContent = 'Aplicando...';
+  try {
+    const resp = await fetch('/api/admin/provision', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(window._provisionCfg),
+    });
+    const data = await resp.json();
+    renderResult(data);
+  } catch (e) {
+    renderResult({ success: false, steps: [{ name: 'Chamada ao servidor', ok: false, http_code: 0, response: String(e) }] });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Aplicar';
+  }
+}
+
+function renderResult(data) {
+  document.getElementById('summaryCard').style.display = 'none';
+  document.getElementById('resultCard').style.display = 'block';
+  const stepsEl = document.getElementById('steps');
+  const steps = data.steps || [];
+
+  // O servidor já tira access_key/secret_key de toda resposta antes de
+  // mandar pra cá -- de propósito, a credencial (migrada ou gerada) só deve
+  // aparecer do lado do weed admin, nunca renderizada nesta página.
+  const usedGeneratedKey = window._provisionCfg && window._provisionCfg.generate_key && window._provisionCfg.user_name;
+  let calloutHtml = '';
+  if (usedGeneratedKey && data.success) {
+    calloutHtml =
+      '<div class="not-shown" style="padding:12px 14px; margin-bottom:12px; border-color:var(--accent);">' +
+        '<strong>Credencial gerada.</strong> Por design, esta página não mostra o valor —' +
+        ' consulte em weed admin &gt; Object Store Users (ou <code>GET /api/users</code>) para pegar o access key/secret e repassar ao cliente.' +
+      '</div>';
+  }
+
+  stepsEl.innerHTML = calloutHtml + (steps.map(s =>
+    '<div class="step ' + (s.ok ? 'ok' : 'fail') + '">' +
+      '<div class="badge">' + (s.ok ? 'OK' : 'FALHOU') + '</div>' +
+      '<div>' + s.name + ' (HTTP ' + s.http_code + ')' +
+        '<div class="detail">' + escapeHtml(typeof s.response === 'string' ? s.response : JSON.stringify(s.response)) + '</div>' +
+      '</div>' +
+    '</div>'
+  ).join('') || '<div>Nenhum passo executado.</div>');
+  if (!data.success) {
+    stepsEl.innerHTML += '<div style="margin-top:8px; color: var(--danger);">Parou no primeiro passo que falhou — nada depois foi aplicado.</div>';
+  }
+}
+
+// --- aba de Permissões (IAM) ---------------------------------------------
+
+let iamUsers = [];
+let iamBuckets = [];
+
+async function loadIamData() {
+  const status = document.getElementById('iamStatus');
+  status.textContent = 'Carregando...';
+  try {
+    const resp = await fetch('/api/admin/iam');
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.status);
+    iamUsers = data.users || [];
+    iamBuckets = data.buckets || [];
+    renderIamSelects();
+    renderIamTable();
+    status.textContent = '';
+  } catch (e) {
+    status.textContent = 'Erro ao carregar: ' + e.message;
+  }
+}
+
+function renderIamSelects() {
+  const userSel = document.getElementById('iamUser');
+  const prevUser = userSel.value;
+  userSel.innerHTML = iamUsers.map(u => '<option value="' + escapeAttr(u.username) + '">' + escapeHtml(u.username) + '</option>').join('');
+  if (prevUser) userSel.value = prevUser;
+
+  const bucketSel = document.getElementById('iamBucket');
+  const prevBucket = bucketSel.value;
+  bucketSel.innerHTML = '<option value="">* (todos os buckets)</option>' +
+    iamBuckets.map(b => '<option value="' + escapeAttr(b.name) + '">' + escapeHtml(b.name) + '</option>').join('');
+  bucketSel.value = prevBucket || '';
+}
+
+function renderIamTable() {
+  const body = document.getElementById('iamTableBody');
+  body.innerHTML = iamUsers.map(u => {
+    const perms = (u.permissions || []).map(p =>
+      '<span class="perm-tag">' + escapeHtml(p) +
+        '<button data-revoke data-username="' + escapeAttr(u.username) + '" data-action="' + escapeAttr(p) + '" title="remover">×</button>' +
+      '</span>'
+    ).join('') || '<span style="color:var(--text-dim);">nenhuma</span>';
+    return '<tr><td>' + escapeHtml(u.username) + '</td><td>' + perms + '</td></tr>';
+  }).join('') || '<tr><td colspan="2">Nenhum usuário -- crie um na aba Provisionar.</td></tr>';
+}
+
+document.getElementById('iamTableBody').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-revoke]');
+  if (!btn) return;
+  applyIamChange(btn.dataset.username, btn.dataset.action, 'remove');
+});
+
+function grantPermission() {
+  const username = document.getElementById('iamUser').value;
+  const bucket = document.getElementById('iamBucket').value;
+  const action = document.getElementById('iamAction').value;
+  if (!username) { alert('Selecione um usuário (crie um na aba Provisionar se a lista estiver vazia).'); return; }
+  const actionString = bucket ? (action + ':' + bucket) : action;
+  applyIamChange(username, actionString, 'add');
+}
+
+async function applyIamChange(username, actionString, op) {
+  const status = document.getElementById('iamStatus');
+  status.textContent = 'Aplicando...';
+  try {
+    const resp = await fetch('/api/admin/iam/policy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, action_string: actionString, op }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || !data.success) {
+      status.textContent = 'Erro: ' + (data.error || data.detail || resp.status);
+      return;
+    }
+    status.textContent = '';
+    await loadIamData();
+  } catch (e) {
+    status.textContent = 'Erro: ' + e.message;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+function escapeAttr(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+</script>
+</body>
+</html>
+ENDADMINHTML
+)
+
 UPLOAD_DEMO_SERVER_PY=$(cat <<'ENDPY'
 #!/usr/bin/env python3
 # Serve a página estática do demo e expõe /api/quota como proxy somente-leitura
@@ -845,6 +1543,9 @@ UPLOAD_DEMO_SERVER_PY=$(cat <<'ENDPY'
 # quota real nenhuma e deixar essa demo acompanhar/exibir o número por conta
 # própria, comparando com bucket_size_bytes (que é sempre real, vem do SeaweedFS
 # independente de ter cota configurada ou não).
+import base64
+import hmac
+import http.cookiejar
 import http.server
 import json
 import os
@@ -856,6 +1557,20 @@ import urllib.request
 
 METRICS_URL = "http://127.0.0.1:9327/metrics"
 QUOTA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "informational_quotas.json")
+
+# /api/admin/provision é a exceção deliberada ao comentário acima: fala com
+# a API REST do `weed admin` (usuário + bucket + lifecycle) e portanto grava
+# credencial admin real. Existe só para o path /admin.html, que não é
+# linkado do index.html nem pensado pra cliente ver -- é a página de teste
+# admin descrita em 09-provisionar-cliente.sh, só que como página web em vez
+# de script de terminal. Em produção fora do lab isso pediria autenticação
+# nesta própria página, não só no weed admin.
+# Esta cópia local usa o IP/porta atuais do lab (00-config.env: ADMIN_HOST
+# + SEAWEED_ADMIN_PORT) direto, sem placeholder -- no heredoc embutido em
+# 04-gerar-cloud-init.sh o mesmo valor entra como __ADMIN_API_HOST__ /
+# __ADMIN_API_PORT__, substituído na hora do deploy (mesmo padrão já usado
+# ali para __S3_ACCESS_KEY__/__S3_SECRET_KEY__).
+ADMIN_API_BASE = os.environ.get("ADMIN_API_BASE", "http://192.168.100.11:23646/api")
 
 METRIC_NAMES = {
     "SeaweedFS_s3_bucket_size_bytes": "used_bytes",
@@ -917,7 +1632,172 @@ def build_quota_response(bucket):
     }
 
 
+# O weed admin (4.47) só aceita conexões fora do loopback com senha: sessão
+# por cookie (POST /login) + token CSRF (meta csrf-token de /admin) em
+# X-CSRF-Token nas escritas. Credenciais = ADMIN_USER/ADMIN_PASSWORD do
+# 00-config.env, sobrescrevíveis por variável de ambiente.
+ADMIN_ROOT = ADMIN_API_BASE.rsplit("/api", 1)[0]
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "swfslab-admin")
+_admin_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+_admin_csrf = None
+
+
+def _admin_login():
+    global _admin_csrf
+    page = _admin_opener.open(ADMIN_ROOT + "/login", timeout=10).read().decode("utf-8", "replace")
+    m = re.search(r'name="csrf_token" value="([^"]*)"', page)
+    if not m:
+        raise RuntimeError("não achei o token do formulário de login do weed admin")
+    form = urllib.parse.urlencode({
+        "username": ADMIN_USER, "password": ADMIN_PASSWORD, "csrf_token": m.group(1),
+    }).encode("utf-8")
+    after = _admin_opener.open(
+        urllib.request.Request(ADMIN_ROOT + "/login", data=form, method="POST"), timeout=10
+    ).read().decode("utf-8", "replace")
+    m = re.search(r'name="csrf-token" content="([^"]*)"', after)
+    if not m:
+        raise RuntimeError("login no weed admin falhou (confira ADMIN_USER/ADMIN_PASSWORD)")
+    _admin_csrf = m.group(1)
+
+
+def admin_api_call(method, path, payload=None):
+    """Chama a API REST do weed admin (ex: /s3/buckets, /users), já logado.
+    Retorna (http_code, corpo_como_texto); http_code 0 = não deu pra
+    conectar/logar."""
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    for attempt in (1, 2):
+        try:
+            if _admin_csrf is None:
+                _admin_login()
+            req = urllib.request.Request(
+                ADMIN_API_BASE + path, data=data, method=method,
+                headers={"Content-Type": "application/json", "X-CSRF-Token": _admin_csrf},
+            )
+            with _admin_opener.open(req, timeout=10) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403) and attempt == 1:
+                globals()["_admin_csrf"] = None   # sessão expirou / token velho: refaz o login
+                continue
+            return e.code, e.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, RuntimeError) as e:
+            return 0, str(getattr(e, "reason", e))
+    return 0, "falha ao autenticar no weed admin"
+
+
+def redact_secrets(value):
+    """Remove access_key/secret_key de qualquer resposta antes dela voltar
+    pro navegador -- a credencial (migrada ou gerada) só deve ficar visível
+    do lado do weed admin (sua própria UI, ou GET /api/users), nunca
+    renderizada nesta página de demo."""
+    if isinstance(value, dict):
+        return {
+            k: ("(oculto -- consulte no weed admin)" if k in ("access_key", "secret_key") and isinstance(v, str) else redact_secrets(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_secrets(v) for v in value]
+    return value
+
+
+def run_provisioning(cfg):
+    """Roda só os passos que fazem sentido pro que foi preenchido: usuário
+    sozinho, bucket sozinho, ou os dois -- usuário primeiro, pra poder virar
+    owner do bucket quando link_owner estiver marcado. Para no primeiro
+    passo que falhar."""
+    steps = []
+    user_name = cfg.get("user_name")
+    bucket_name = cfg.get("bucket_name")
+    link_owner = bool(cfg.get("link_owner")) and bool(user_name) and bool(bucket_name)
+
+    def step(name, method, path, body):
+        code, resp_body = admin_api_call(method, path, body)
+        ok = 200 <= code < 300
+        try:
+            resp_json = json.loads(resp_body)
+        except (json.JSONDecodeError, TypeError):
+            resp_json = resp_body
+        steps.append({"name": name, "ok": ok, "http_code": code, "response": redact_secrets(resp_json)})
+        return ok
+
+    if user_name:
+        generate_key = cfg["generate_key"]
+        # actions vazio quando não vinculado -- dá pra conceder permissões
+        # depois pela aba de Permissões (IAM), sem precisar recriar o usuário.
+        actions = [f"Admin:{bucket_name}"] if link_owner else []
+        if not step("Criar usuário", "POST", "/users", {
+            "username": user_name, "email": "", "actions": actions,
+            "generate_key": generate_key, "policy_names": [],
+        }):
+            return steps
+
+        # Com generate_key=true a própria criação do usuário já devolve a
+        # credencial (sob a mesma redação acima) -- não existe um segundo
+        # passo de "anexar chave" nesse caso.
+        if not generate_key and not step("Anexar access key/secret", "POST", f"/users/{user_name}/access-keys", {
+            "access_key": cfg["access_key"], "secret_key": cfg["secret_key"],
+        }):
+            return steps
+
+    if bucket_name:
+        owner = user_name if link_owner else ""
+        bucket_step_name = f"Criar bucket (owner={owner})" if owner else "Criar bucket (sem owner)"
+        if not step(bucket_step_name, "POST", "/s3/buckets", {
+            "name": bucket_name, "region": "",
+            "quota_size": cfg["quota_size"], "quota_unit": cfg["quota_unit"],
+            "quota_enabled": cfg["quota_enabled"],
+            "versioning_enabled": cfg["versioning_enabled"],
+            "object_lock_enabled": cfg["object_lock_enabled"],
+            "object_lock_mode": cfg["object_lock_mode"],
+            "set_default_retention": cfg["set_default_retention"],
+            "object_lock_duration": cfg["object_lock_days"] if cfg["set_default_retention"] else 0,
+            "owner": owner,
+        }):
+            return steps
+
+        # Lifecycle é opcional: sem regra nenhuma marcada no formulário, o
+        # bucket fica só com versionamento (+ Object Lock, se ativado) e este
+        # passo nem roda -- não força nenhum limite de versão sozinho.
+        lifecycle_rule = cfg.get("lifecycle_rule")
+        if lifecycle_rule:
+            rule = {"status": "Enabled"}
+            rule.update(lifecycle_rule)
+            step("Aplicar lifecycle", "PUT", f"/s3/buckets/{bucket_name}/lifecycle", {
+                "bucket": bucket_name,
+                "rules": [rule],
+            })
+    return steps
+
+
+def needs_admin_auth(path):
+    return path == "/admin.html" or path.startswith("/api/admin/")
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def _admin_auth_ok(self):
+        """HTTP Basic com a mesma credencial do weed admin (ADMIN_USER/
+        ADMIN_PASSWORD). /admin.html e /api/admin/* criam usuários e buckets
+        com a credencial admin, então não podem ficar abertos pra rede."""
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            return False
+        try:
+            user, _, pwd = base64.b64decode(header[6:]).decode("utf-8").partition(":")
+        except (ValueError, UnicodeDecodeError):
+            return False
+        return (hmac.compare_digest(user.encode(), ADMIN_USER.encode())
+                and hmac.compare_digest(pwd.encode(), ADMIN_PASSWORD.encode()))
+
+    def _deny_auth(self):
+        body = b"Autenticacao necessaria (usuario/senha do weed admin)."
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Administracao SeaweedFS"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _json(self, status, payload):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
@@ -928,6 +1808,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
+        if needs_admin_auth(parsed.path) and not self._admin_auth_ok():
+            return self._deny_auth()
+        if parsed.path == "/api/admin/iam":
+            return self._handle_iam_get()
         if parsed.path != "/api/quota":
             return super().do_GET()
 
@@ -940,20 +1824,31 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (urllib.error.URLError, OSError) as e:
             self._json(502, {"error": f"não consegui ler {METRICS_URL}: {e}"})
 
+    def _read_json_body(self, max_len=4096):
+        length = int(self.headers.get("Content-Length", 0))
+        if length <= 0 or length > max_len:
+            self._json(400, {"error": "corpo da requisição ausente ou grande demais"})
+            return None
+        try:
+            return json.loads(self.rfile.read(length))
+        except json.JSONDecodeError:
+            self._json(400, {"error": "corpo inválido, esperado JSON"})
+            return None
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
+        if needs_admin_auth(parsed.path) and not self._admin_auth_ok():
+            return self._deny_auth()
+        if parsed.path == "/api/admin/provision":
+            return self._handle_provision_post()
+        if parsed.path == "/api/admin/iam/policy":
+            return self._handle_iam_policy_post()
         if parsed.path != "/api/quota":
             self._json(404, {"error": "not found"})
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        if length <= 0 or length > 4096:
-            self._json(400, {"error": "corpo da requisição ausente ou grande demais"})
-            return
-        try:
-            body = json.loads(self.rfile.read(length))
-        except json.JSONDecodeError:
-            self._json(400, {"error": "corpo inválido, esperado JSON"})
+        body = self._read_json_body()
+        if body is None:
             return
 
         bucket = str(body.get("bucket", "")).strip()
@@ -981,13 +1876,157 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (urllib.error.URLError, OSError) as e:
             self._json(502, {"error": f"cota salva, mas não consegui ler {METRICS_URL}: {e}"})
 
+    def _handle_provision_post(self):
+        body = self._read_json_body(max_len=8192)
+        if body is None:
+            return
+
+        user_name = str(body.get("user_name", "")).strip()
+        bucket_name = str(body.get("bucket_name", "")).strip()
+        if not user_name and not bucket_name:
+            self._json(400, {"error": "informe user_name e/ou bucket_name"})
+            return
+
+        link_owner = bool(body.get("link_owner"))
+        if link_owner and not (user_name and bucket_name):
+            self._json(400, {"error": "link_owner requer user_name e bucket_name preenchidos"})
+            return
+
+        generate_key = bool(body.get("generate_key"))
+        access_key = str(body.get("access_key", "")).strip()
+        secret_key = str(body.get("secret_key", "")).strip()
+        if user_name and not generate_key and (not access_key or not secret_key):
+            self._json(400, {"error": "informe access_key e secret_key, ou generate_key=true"})
+            return
+
+        object_lock_enabled = bool(body.get("object_lock_enabled"))
+        object_lock_mode = str(body.get("object_lock_mode", "")).strip().upper()
+        if bucket_name and object_lock_enabled and object_lock_mode not in ("GOVERNANCE", "COMPLIANCE"):
+            self._json(400, {"error": "object_lock_mode precisa ser GOVERNANCE ou COMPLIANCE quando object_lock_enabled=true"})
+            return
+
+        # Mesma regra do SeaweedFS/S3: Object Lock exige versionamento --
+        # força aqui também (não só na UI) pra quem chamar a API direto sem
+        # passar por admin.html não conseguir criar uma combinação inválida.
+        versioning_enabled = bool(body.get("versioning_enabled")) or object_lock_enabled
+
+        # Object Lock e retenção padrão são independentes -- dá pra ativar o
+        # lock no bucket (necessário pro cliente travar objeto por objeto,
+        # ex: Veeam mandando a própria retain-until-date) sem forçar uma
+        # regra padrão que exigiria pelo menos 1 dia em todo objeto novo.
+        set_default_retention = bool(body.get("set_default_retention"))
+        if set_default_retention and not object_lock_enabled:
+            self._json(400, {"error": "set_default_retention requer object_lock_enabled"})
+            return
+
+        try:
+            object_lock_days = int(body.get("object_lock_days") or 0)
+            quota_size = int(body.get("quota_size") or 0)
+        except (TypeError, ValueError):
+            self._json(400, {"error": "object_lock_days e quota_size precisam ser números"})
+            return
+        if set_default_retention and object_lock_days <= 0:
+            self._json(400, {"error": "object_lock_days precisa ser > 0 quando set_default_retention=true"})
+            return
+
+        lifecycle_rule = body.get("lifecycle_rule")
+        if lifecycle_rule is not None and not isinstance(lifecycle_rule, dict):
+            self._json(400, {"error": "lifecycle_rule precisa ser um objeto ou null"})
+            return
+
+        cfg = {
+            "user_name": user_name,
+            "bucket_name": bucket_name,
+            "link_owner": link_owner,
+            "generate_key": generate_key,
+            "access_key": access_key,
+            "secret_key": secret_key,
+            "versioning_enabled": versioning_enabled,
+            "object_lock_enabled": object_lock_enabled,
+            "object_lock_mode": object_lock_mode,
+            "set_default_retention": set_default_retention,
+            "object_lock_days": object_lock_days,
+            "lifecycle_rule": lifecycle_rule,
+            "quota_enabled": bool(body.get("quota_enabled")),
+            "quota_size": quota_size,
+            "quota_unit": str(body.get("quota_unit", "GB") or "GB").strip().upper(),
+        }
+
+        steps = run_provisioning(cfg)
+        success = bool(steps) and all(s["ok"] for s in steps)
+        self._json(200, {"success": success, "steps": steps})
+
+    def _handle_iam_get(self):
+        """Lista usuários (com permissões) e buckets pra aba de IAM. Nunca
+        inclui access_key/secret_key -- mesma regra de redação do resto
+        desta página."""
+        code, body = admin_api_call("GET", "/users")
+        if not (200 <= code < 300):
+            self._json(502 if code == 0 else code, {"error": f"weed admin: {body}"})
+            return
+        try:
+            users_raw = json.loads(body).get("users") or []
+        except json.JSONDecodeError:
+            users_raw = []
+        users = [{"username": u.get("username"), "permissions": u.get("permissions") or []} for u in users_raw]
+
+        buckets = []
+        code2, body2 = admin_api_call("GET", "/s3/buckets")
+        if 200 <= code2 < 300:
+            try:
+                buckets = [{"name": b.get("name")} for b in (json.loads(body2).get("buckets") or [])]
+            except json.JSONDecodeError:
+                pass
+
+        self._json(200, {"users": users, "buckets": buckets})
+
+    def _handle_iam_policy_post(self):
+        """Adiciona ou remove uma permissão (ex: 'Read:meu-bucket', ou
+        'Admin' sem bucket = global) da lista de actions de um usuário.
+        A API do weed admin só substitui a lista inteira, então lê o
+        estado atual, ajusta, e reenvia."""
+        body = self._read_json_body(max_len=2048)
+        if body is None:
+            return
+
+        username = str(body.get("username", "")).strip()
+        action_string = str(body.get("action_string", "")).strip()
+        op = str(body.get("op", "")).strip()
+        if not username or not action_string or op not in ("add", "remove"):
+            self._json(400, {"error": "informe username, action_string e op ('add' ou 'remove')"})
+            return
+
+        code, resp_body = admin_api_call("GET", f"/users/{username}")
+        if not (200 <= code < 300):
+            self._json(502 if code == 0 else code, {"error": f"não encontrei o usuário: {resp_body}"})
+            return
+        try:
+            current = json.loads(resp_body).get("actions") or []
+        except json.JSONDecodeError:
+            current = []
+
+        if op == "add":
+            new_actions = current if action_string in current else current + [action_string]
+        else:
+            new_actions = [a for a in current if a != action_string]
+
+        code2, resp_body2 = admin_api_call("PUT", f"/users/{username}/policies", {"actions": new_actions})
+        ok = 200 <= code2 < 300
+        self._json(200 if ok else (502 if code2 == 0 else code2), {
+            "success": ok,
+            "actions": new_actions if ok else current,
+            "detail": resp_body2,
+        })
+
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8090
-    http.server.HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    # BIND_ADDR=127.0.0.1 ao rodar no host: /admin.html usa a credencial admin,
+    # então não deve ficar aberto pra rede local.
+    http.server.HTTPServer((os.environ.get("BIND_ADDR", "0.0.0.0"), port), Handler).serve_forever()
 ENDPY
 )
 
@@ -1235,7 +2274,7 @@ for vm in "${VM_NAMES[@]}"; do
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed admin -port=${SEAWEED_ADMIN_PORT} -master=${MASTER_PEERS} -dataDir=${STATE_DIR}/admin
+      ExecStart=/usr/local/bin/weed admin -ip=0.0.0.0 -port=${SEAWEED_ADMIN_PORT} -master=${MASTER_PEERS} -dataDir=${STATE_DIR}/admin -adminUser=${ADMIN_USER} -adminPassword=${ADMIN_PASSWORD}
       Restart=on-failure
       RestartSec=5
 
@@ -1246,6 +2285,38 @@ for vm in "${VM_NAMES[@]}"; do
   - mkdir -p ${STATE_DIR}/admin
   - systemctl daemon-reload
   - /usr/local/bin/svc-enable-now.sh weed-admin.service"
+    fi
+
+    if [[ "$vm" == "$ADMIN_HOST" ]]; then
+        EC_ROTINA_SH_INDENTED=$(printf '%s\n' "$EC_ROTINA_SH" | indent "      ")
+        WEED_UNITS+="
+  - path: /usr/local/bin/swfs-ec-rotina.sh
+    permissions: '0755'
+    content: |
+${EC_ROTINA_SH_INDENTED}
+
+  - path: /etc/cron.d/swfs-ec
+    permissions: '0644'
+    content: |
+      # Rotina de Erasure Coding (ec.encode + ec.balance). Log: /var/log/swfs-ec-rotina.log
+      EC_FULL_PERCENT=${EC_CRON_FULL_PERCENT}
+      EC_QUIET_FOR=${EC_CRON_QUIET_FOR}
+      ${EC_CRON_SCHEDULE} ${VM_USER} /usr/bin/flock -n /tmp/swfs-ec.lock /usr/local/bin/swfs-ec-rotina.sh >> /var/log/swfs-ec-rotina.log 2>&1
+
+  - path: /etc/logrotate.d/swfs-ec
+    permissions: '0644'
+    content: |
+      /var/log/swfs-ec-rotina.log {
+          weekly
+          rotate 4
+          compress
+          missingok
+          notifempty
+      }
+"
+        WEED_RUNCMD+="
+  - touch /var/log/swfs-ec-rotina.log
+  - chown ${VM_USER}:${VM_USER} /var/log/swfs-ec-rotina.log"
     fi
 
     if [[ "$vm" == "$WORKER_HOST" ]]; then
@@ -1275,11 +2346,17 @@ for vm in "${VM_NAMES[@]}"; do
     if [[ "$vm" == "$UPLOAD_DEMO_HOST" ]]; then
         UPLOAD_DEMO_HTML_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_HTML" | indent "      ")
         UPLOAD_DEMO_SERVER_PY_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_SERVER_PY" | indent "      ")
+        UPLOAD_DEMO_ADMIN_HTML_INDENTED=$(printf '%s\n' "$UPLOAD_DEMO_ADMIN_HTML" | indent "      ")
         WEED_UNITS+="
   - path: /var/www/upload-demo/index.html
     permissions: '0644'
     content: |
 ${UPLOAD_DEMO_HTML_INDENTED}
+
+  - path: /var/www/upload-demo/admin.html
+    permissions: '0644'
+    content: |
+${UPLOAD_DEMO_ADMIN_HTML_INDENTED}
 
   - path: /var/www/upload-demo/server.py
     permissions: '0644'
@@ -1290,12 +2367,15 @@ ${UPLOAD_DEMO_SERVER_PY_INDENTED}
     permissions: '0644'
     content: |
       [Unit]
-      Description=Pagina de demo de upload S3 (estatica + proxy /api/quota, so para teste)
+      Description=Pagina de demo de upload S3 + /admin.html de administracao (so para teste)
       After=network-online.target
       Wants=network-online.target
 
       [Service]
       WorkingDirectory=/var/www/upload-demo
+      Environment=ADMIN_API_BASE=http://${VM_IP[$ADMIN_HOST]}:${SEAWEED_ADMIN_PORT}/api
+      Environment=ADMIN_USER=${ADMIN_USER}
+      Environment=ADMIN_PASSWORD=${ADMIN_PASSWORD}
       ExecStart=/usr/bin/python3 /var/www/upload-demo/server.py ${SEAWEED_UPLOAD_DEMO_PORT}
       Restart=on-failure
       RestartSec=5
