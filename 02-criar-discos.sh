@@ -41,12 +41,12 @@ for vm in "${VM_NAMES[@]}"; do
     # ver nota no 00-config.env.
     DATA_SIZE="${VM_DATA_DISK_SIZE[$vm]:-}"
     if [[ -n "$DATA_SIZE" ]]; then
-        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
+        for ((d = 0; d < VOLUME_DISKS_PER_NODE; d++)); do
             DATA_DISK="$VM_DIR/${vm}-data${d}.qcow2"
             if [[ -f "$DATA_DISK" ]]; then
                 warn "$vm: disco de dados $d já existe ($DATA_DISK), pulando."
             else
-                log "$vm: criando disco de dados $d/${VOLUME_DISKS_PER_NODE} (${DATA_SIZE}, cru, para o SeaweedFS)"
+                log "$vm: criando disco de dados $d (posição ${DISK_CONTROLLER}:${DISK_BACKPLANE}:$d) (${DATA_SIZE}, cru, para o SeaweedFS)"
                 qemu-img create -f qcow2 "$DATA_DISK" "$DATA_SIZE"
             fi
         done

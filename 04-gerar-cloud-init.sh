@@ -25,31 +25,9 @@ warn() { echo -e "\e[1;33m[!]\e[0m $*"; }
 die()  { echo -e "\e[1;31m[x]\e[0m $*" >&2; exit 1; }
 
 # --- modelo de replicação padrão do cluster (-defaultReplication no master) ---
-# Pergunta ANTES do deploy, porque não dá pra trocar depois sem reiniciar os
-# masters (e redistribuir os volumes já criados). Sem isso, o SeaweedFS usa
-# "000" por padrão -- só soma a capacidade de vol1+vol2, sem nenhuma cópia
-# extra (testado e documentado no RELATORIO.md desta sessão). O código tem
-# 3 dígitos -- datacenter/rack/node, confirmado ao vivo pela própria
-# mensagem de erro do master ("001"->{"node":1}, "010"->{"rack":1},
-# "100"->{"dc":1}) -- por isso é "010" que replica em outro RACK, não
-# "001" (esse pediria outro SERVIDOR no mesmo rack, que este lab não tem).
-# Nesta topologia (1 datacenter, 2 racks, 1 volume server por rack), só
-# "000" e "010" fazem sentido de verdade -- os demais códigos exigiriam
-# mais racks/datacenters/servidores do que o lab tem.
-if [[ -t 0 ]]; then
-    echo
-    echo "Qual modelo de replicação padrão o cluster deve usar?"
-    echo "  1) 000 - nenhuma (padrão do SeaweedFS) - soma a capacidade de vol1+vol2, sem redundância"
-    echo "  2) 010 - 1 cópia extra em outro rack - todo arquivo grava em vol1 E replica em vol2 (ou vice-versa)"
-    read -r -p "Escolha [1/2] (Enter = 1, mesmo comportamento de antes): " REPLICATION_CHOICE
-    case "$REPLICATION_CHOICE" in
-        2) MASTER_DEFAULT_REPLICATION="010" ;;
-        *) MASTER_DEFAULT_REPLICATION="000" ;;
-    esac
-else
-    warn "Stdin não é um terminal (execução não-interativa) -- usando replicação padrão 000."
-    MASTER_DEFAULT_REPLICATION="000"
-fi
+# Fixo em 000 (MASTER_DEFAULT_REPLICATION no 00-config.env): nenhuma cópia
+# extra -- o objetivo do lab é testar erasure coding, não replicação. Sem
+# prompt: com rack único, "010" (outro rack) nem seria possível.
 log "Replicação padrão do cluster: -defaultReplication=$MASTER_DEFAULT_REPLICATION"
 
 SEED_TOOL=""
@@ -1035,29 +1013,30 @@ for vm in "${VM_NAMES[@]}"; do
     EXTRA_PACKAGES=""
     $IS_PGSQL && EXTRA_PACKAGES="  - postgresql"
 
-    # Discos de dados (só existem nos volume nodes -- as demais VMs não
-    # têm VM_DATA_DISK_SIZE preenchido em 00-config.env, então não têm
-    # nada anexado, ver 02-criar-discos.sh e 05-criar-vms.sh). São
-    # VOLUME_DISKS_PER_NODE discos INDEPENDENTES (/dev/vdb, /dev/vdc,
-    # ...), cada um formatado e montado no seu próprio ponto
-    # (${DATA_MOUNT_DIR}/disk1, /disk2, ...) -- de propósito, para que
-    # cada disco tenha seu próprio filesystem e `statfs` correto (ver
-    # nota no 00-config.env sobre o bug de capacidade em dobro que isso
-    # evita, comparado a 2 processos dividindo 1 disco só).
+    # Discos de dados (só existem nos volume nodes). São
+    # VOLUME_DISKS_PER_NODE discos INDEPENDENTES, cada um com a posição de
+    # um disco de servidor Dell -- controladora:backplane:disco (ver
+    # 00-config.env) -- formatado, rotulado e montado no seu próprio ponto
+    # (${DATA_MOUNT_DIR}/disk0, /disk1, ...). Cada disco é achado pelo
+    # endereço SCSI (target = índice do disco, definido no 05-criar-vms.sh),
+    # não por /dev/sdX, cuja ordem não é garantida. Rótulo do ext4 (máx.
+    # 16 chars): <nodeNN>-<ctrl>-<backplane>-<disco> (ex.: node01-0-1-2).
     DATA_DISK_RUNCMD=""
     if $IS_VOLUME; then
+        NODE_SHORT="${vm#swfs-}"
         DATA_DISK_RUNCMD="
-  # --- discos de dados: ${VOLUME_DISKS_PER_NODE} devices independentes,
-  # cada um formatado (1x) e montado em ${DATA_MOUNT_DIR}/diskN, dono
-  # certo pro ${VM_USER} -- sem isso, \"weed volume\" falha com
+  # --- discos de dados: ${VOLUME_DISKS_PER_NODE} devices independentes, cada um
+  # formatado (1x), rotulado pela posição e montado em ${DATA_MOUNT_DIR}/diskN,
+  # dono certo pro ${VM_USER} -- sem isso, \"weed volume\" falha com
   # \"permission denied\" ao criar suas pastas de estado.
   - mkdir -p ${DATA_MOUNT_DIR}"
-        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
-            DEV="${DATA_DISK_DEVICES[$((d - 1))]}"
+        for ((d = 0; d < VOLUME_DISKS_PER_NODE; d++)); do
+            DISK_POS="${DISK_CONTROLLER}:${DISK_BACKPLANE}:${d}"
+            DISK_LABEL="${NODE_SHORT}-${DISK_CONTROLLER}-${DISK_BACKPLANE}-${d}"
             DATA_DISK_RUNCMD+="
-  - [ bash, -c, \"blkid ${DEV} >/dev/null 2>&1 || mkfs.ext4 -F -L swfs-disk${d} ${DEV}\" ]
+  - [ bash, -c, \"DEV=\$(/usr/local/bin/swfs-disk-dev.sh ${d}) && { blkid \$DEV >/dev/null 2>&1 || mkfs.ext4 -F -L ${DISK_LABEL} \$DEV; }\" ]
   - mkdir -p ${DATA_MOUNT_DIR}/disk${d}
-  - [ bash, -c, \"grep -q '^LABEL=swfs-disk${d}' /etc/fstab || echo 'LABEL=swfs-disk${d} ${DATA_MOUNT_DIR}/disk${d} ext4 defaults 0 2' >> /etc/fstab\" ]"
+  - [ bash, -c, \"grep -q '^LABEL=${DISK_LABEL} ' /etc/fstab || { echo '# KVM: ${vm} / ${vm}-data${d}.qcow2 | posicao ${DISK_POS} (ctrl:backplane:disco) | SCSI target ${d} | serial ${vm}-${DISK_CONTROLLER}-${DISK_BACKPLANE}-${d}' >> /etc/fstab; echo 'LABEL=${DISK_LABEL} ${DATA_MOUNT_DIR}/disk${d} ext4 defaults 0 2' >> /etc/fstab; }\" ]"
         done
         DATA_DISK_RUNCMD+="
   - mount -a
@@ -1080,7 +1059,7 @@ for vm in "${VM_NAMES[@]}"; do
       Wants=network-online.target
 
       [Service]
-      ExecStart=/usr/local/bin/weed master -mdir=${STATE_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS} -defaultReplication=${MASTER_DEFAULT_REPLICATION}
+      ExecStart=/usr/local/bin/weed master -mdir=${STATE_DIR}/master -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -peers=${MASTER_PEERS} -defaultReplication=${MASTER_DEFAULT_REPLICATION} -volumeSizeLimitMB=${MASTER_VOLUME_SIZE_LIMIT_MB}
       Restart=on-failure
       RestartSec=5
 
@@ -1134,38 +1113,55 @@ for vm in "${VM_NAMES[@]}"; do
     fi
 
     if $IS_VOLUME; then
-        # 1 processo `weed volume` por node, dono de VOLUME_DISKS_PER_NODE
-        # discos independentes -- passados como lista separada por vírgula
-        # em -dir (é assim que o SeaweedFS lida nativamente com um
-        # servidor multi-disco; cada disco reporta seu próprio statfs
-        # certinho, sem o double-counting que 2 processos no mesmo disco
-        # causavam -- ver HISTORICO.md e a nota no 00-config.env).
-        VOLUME_DIRS=""
-        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
-            VOLUME_DIRS+="${DATA_MOUNT_DIR}/disk${d},"
-        done
-        VOLUME_DIRS="${VOLUME_DIRS%,}"   # tira a vírgula final
-
+        # 1 processo `weed volume` POR DISCO (como no servidor físico), cada
+        # um com sua porta (BASE_PORT + índice do disco) e seu diretório.
+        # systemd não faz aritmética em unit template, então são
+        # VOLUME_DISKS_PER_NODE units explícitas: weed-volume-disk<N>.service.
+        # Helper que traduz índice do disco -> /dev/sdX pelo endereço SCSI
+        # (usado na formatação, ver DATA_DISK_RUNCMD acima).
         WEED_UNITS+="
-  - path: /etc/systemd/system/weed-volume.service
+  - path: /usr/local/bin/swfs-disk-dev.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # uso: swfs-disk-dev.sh <índice do disco = SCSI target> -> imprime /dev/sdX
+      for i in \$(seq 1 30); do
+          for d in /sys/class/scsi_disk/*:0:\$1:0; do
+              if [ -d \"\$d/device/block\" ]; then
+                  echo \"/dev/\$(ls \"\$d/device/block\" | head -n 1)\"
+                  exit 0
+              fi
+          done
+          sleep 1
+      done
+      exit 1
+"
+        WEED_RUNCMD+="
+  - systemctl daemon-reload"
+        for ((d = 0; d < VOLUME_DISKS_PER_NODE; d++)); do
+            DISK_POS="${DISK_CONTROLLER}:${DISK_BACKPLANE}:${d}"
+            VOL_PORT=$((SEAWEED_VOLUME_BASE_PORT + d))
+            WEED_UNITS+="
+  - path: /etc/systemd/system/weed-volume-disk${d}.service
     permissions: '0644'
     content: |
       [Unit]
-      Description=SeaweedFS Volume Server (${VOLUME_DISKS_PER_NODE} discos independentes)
+      Description=SeaweedFS Volume Server - disco ${DISK_POS} (${DATA_MOUNT_DIR}/disk${d}, porta ${VOL_PORT})
       After=network-online.target
       Wants=network-online.target
+      RequiresMountsFor=${DATA_MOUNT_DIR}/disk${d}
 
       [Service]
-      ExecStart=/usr/local/bin/weed volume -dir=${VOLUME_DIRS} -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${SEAWEED_VOLUME_BASE_PORT}
+      ExecStart=/usr/local/bin/weed volume -dir=${DATA_MOUNT_DIR}/disk${d} -mserver=${MASTER_PEERS} -ip=${VM_IP[$vm]} -ip.bind=0.0.0.0 -dataCenter=dc1 -rack=${VM_RACK[$vm]} -port=${VOL_PORT}
       Restart=on-failure
       RestartSec=5
 
       [Install]
       WantedBy=multi-user.target
 "
-        WEED_RUNCMD+="
-  - systemctl daemon-reload
-  - /usr/local/bin/svc-enable-now.sh weed-volume.service"
+            WEED_RUNCMD+="
+  - /usr/local/bin/svc-enable-now.sh weed-volume-disk${d}.service"
+        done
     fi
 
     if $IS_S3FRONT; then

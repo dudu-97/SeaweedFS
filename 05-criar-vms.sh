@@ -72,15 +72,18 @@ for vm in "${VM_NAMES[@]}"; do
     done
 
     # Nem toda VM tem discos de dados (só os volume nodes, ver
-    # VM_DATA_DISK_SIZE) -- quando tem, são VOLUME_DISKS_PER_NODE discos
-    # INDEPENDENTES anexados em ordem (viram /dev/vdb, /dev/vdc, ... na
-    # VM, um device por disco -- ver DATA_DISK_DEVICES no 00-config.env).
-    DISK_ARGS=(--disk path="$OS_DISK",format=qcow2,bus=virtio)
+    # VM_DATA_DISK_SIZE). Quando tem, são VOLUME_DISKS_PER_NODE discos
+    # INDEPENDENTES (qcow2 separados), cada um com a posição de um disco de
+    # servidor Dell (controladora:backplane:disco, ver 00-config.env):
+    # controlador virtio-scsi + endereço SCSI fixo (target = índice do
+    # disco) + serial <vm>-<ctrl>-<backplane>-<disco>. O SO fica em virtio.
+    DISK_ARGS=(--disk path="$OS_DISK",format=qcow2,bus=virtio,serial="${vm}-os")
     if [[ -n "${VM_DATA_DISK_SIZE[$vm]:-}" ]]; then
-        for ((d = 1; d <= VOLUME_DISKS_PER_NODE; d++)); do
+        DISK_ARGS+=(--controller type=scsi,model=virtio-scsi,index=0)
+        for ((d = 0; d < VOLUME_DISKS_PER_NODE; d++)); do
             DATA_DISK="$VM_DIR/${vm}-data${d}.qcow2"
             [[ -f "$DATA_DISK" ]] || die "$DATA_DISK não encontrado. Rode antes: ./02-criar-discos.sh"
-            DISK_ARGS+=(--disk path="$DATA_DISK",format=qcow2,bus=virtio)
+            DISK_ARGS+=(--disk path="$DATA_DISK",format=qcow2,bus=scsi,serial="${vm}-${DISK_CONTROLLER}-${DISK_BACKPLANE}-${d}",address.type=drive,address.controller=0,address.bus=0,address.target="$d",address.unit=0)
         done
     fi
 

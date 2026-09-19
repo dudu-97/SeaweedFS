@@ -50,7 +50,12 @@ for vm in "${VM_NAMES[@]}"; do
         CHECKS+=("${SEAWEED_MASTER_PORT}:/cluster/status:master")
         CHECKS+=("${SEAWEED_FILER_PORT}:/:filer")
     fi
-    $IS_VOLUME && CHECKS+=("${SEAWEED_VOLUME_BASE_PORT}:/status:volume")
+    if $IS_VOLUME; then
+        # 1 processo weed volume por disco: porta BASE+N, N = índice do disco
+        for ((d = 0; d < VOLUME_DISKS_PER_NODE; d++)); do
+            CHECKS+=("$((SEAWEED_VOLUME_BASE_PORT + d)):/status:vol-d${d}")
+        done
+    fi
     $IS_S3FRONT && CHECKS+=("${SEAWEED_S3_PORT}:/:s3")
     [[ "$vm" == "$ADMIN_HOST" ]] && CHECKS+=("${SEAWEED_ADMIN_PORT}:/:admin")
     [[ "$vm" == "$UPLOAD_DEMO_HOST" ]] && CHECKS+=("${SEAWEED_UPLOAD_DEMO_PORT}:/:upload-demo")
@@ -62,10 +67,10 @@ for vm in "${VM_NAMES[@]}"; do
 
     REMOTE_CMD='command -v weed >/dev/null 2>&1 && echo "BIN:ok" || echo "BIN:falta"; '
     if $IS_VOLUME; then
-        # Agora são VOLUME_DISKS_PER_NODE discos independentes, cada um
+        # VOLUME_DISKS_PER_NODE discos independentes (índice 0..N-1), cada um
         # montado em ${DATA_MOUNT_DIR}/diskN -- "ok" só se todos estiverem
         # montados (falta = pelo menos 1 disco sem montar).
-        REMOTE_CMD+='ALL_MOUNTED=1; for d in $(seq 1 '"${VOLUME_DISKS_PER_NODE}"'); do mountpoint -q '"${DATA_MOUNT_DIR}"'/disk$d || ALL_MOUNTED=0; done; [ "$ALL_MOUNTED" = 1 ] && echo "DISK:ok" || echo "DISK:falta"; '
+        REMOTE_CMD+='ALL_MOUNTED=1; for d in $(seq 0 $(( '"${VOLUME_DISKS_PER_NODE}"' - 1 ))); do mountpoint -q '"${DATA_MOUNT_DIR}"'/disk$d || ALL_MOUNTED=0; done; [ "$ALL_MOUNTED" = 1 ] && echo "DISK:ok" || echo "DISK:falta"; '
     else
         REMOTE_CMD+='echo "DISK:n/a"; '
     fi

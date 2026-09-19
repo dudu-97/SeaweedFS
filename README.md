@@ -63,7 +63,7 @@ cluster inteiro responder. Confira com `./06-status.sh` — espera-se
    swfs-master1  swfs-master2  swfs-master3  swfs-s3front1  swfs-pgsql01   swfs-node01..07
     .11 (raft)     .12 (raft)    .13 (raft)      .31            .41         .51-.57
    +filer+admin    +filer        +filer      S3 gateway     PostgreSQL    volume, 8 discos
-   +worker                                    standalone    (metadata      (7 racks,
+   +worker                                    standalone    (metadata      (DefaultRack,
                                                               dos filers)   EC 5+2)
 ```
 
@@ -77,13 +77,15 @@ cluster inteiro responder. Confira com `./06-status.sh` — espera-se
 | swfs-master3 | `weed master` (raft) + `weed filer` | 192.168.100.13 | 1536 MB | 1 | 12 GB |
 | swfs-s3front1 | `weed s3` standalone (gateway S3 puro, aponta pros 3 filers) | 192.168.100.31 | 1024 MB | 1 | 10 GB |
 | swfs-pgsql01 | PostgreSQL — metadata store dos 3 filers (troca o LevelDB embutido) | 192.168.100.41 | 1536 MB | 1 | 20 GB |
-| swfs-node01..07 | `weed volume` — 1 processo por node, dono de 8 discos independentes = 7 volume servers, 1 por rack (rack1-rack7) | 192.168.100.51-.57 | 1536 MB cada | 1 cada | 10 GB SO + 8× 9 GB dados (discos separados) cada |
+| swfs-node01..07 | `weed volume` — 1 processo **por disco** (8 por node, portas 8080–8087) = 56 volume servers, todos no mesmo rack (`DefaultRack`) | 192.168.100.51-.57 | 1536 MB cada | 1 cada | 10 GB SO + 8× 12 GB dados (discos separados) cada |
 
 Por que essa topologia (e não a mínima):
 - **3 masters** — Raft precisa de quorum ímpar ≥3 para eleição/failover ter algo a demonstrar.
 - **`weed s3` separado do filer** (`swfs-s3front1`) — gateway S3 standalone, 1 VM que fala com os 3 filers, sem depender de nenhum deles individualmente pra atender requisição.
 - **PostgreSQL como metadata store** (`swfs-pgsql01`) — substitui o LevelDB local de cada filer, que vira gargalo de concorrência quando múltiplos filers escrevem ao mesmo tempo; os 3 filers compartilham o mesmo banco.
-- **7 volume nodes, 1 processo + 8 discos independentes cada, 1 rack por node** — discos independentes (não pastas de 1 disco só) de propósito: cada um vira um device/filesystem próprio, então o `statfs` que o `weed volume` usa pra reportar espaço livre sai correto por disco — ver `HISTORICO.md` sobre o bug de capacidade em dobro que uma topologia de "processos dividindo 1 disco" causava. Alvo do erasure coding 5+2 (5 dados + 2 paridade = 7 shards, 1 por node): perde-se até 2 racks/nodes e o dado ainda é reconstruível.
+- **7 volume nodes, 8 discos independentes cada com 1 processo `weed volume` por disco (1 porta por disco), todos em 1 único rack (`DefaultRack`)** — discos independentes (não pastas de 1 disco só) de propósito: cada um vira um device/filesystem próprio, então o `statfs` que o `weed volume` usa pra reportar espaço livre sai correto por disco — ver `HISTORICO.md` sobre o bug de capacidade em dobro que uma topologia de "processos dividindo 1 disco" causava. Alvo do erasure coding 5+2 (5 dados + 2 paridade = 7 shards, 1 por node): perde-se até 2 nodes e o dado ainda é reconstruível.
+- **Identificação dos discos (posição estilo Dell):** cada disco tem posição `controladora:backplane:disco` (ex.: `0:1:2` = "Disk 2 in Backplane 1 of RAID Controller", `DISK_CONTROLLER`/`DISK_BACKPLANE` em `00-config.env`, disco de 0 a 7). No KVM, o disco entra num controlador virtio-scsi com endereço SCSI fixo (target = disco) e serial `<vm>-0-1-<disco>` (ex.: `swfs-node01-0-1-2`); na VM é formatado com `LABEL=node01-0-1-<disco>`, montado em `/data/disk<disco>` e servido por `weed-volume-disk<disco>.service` na porta `8080 + disco`. O `/etc/fstab` traz um comentário `# KVM: ... posicao 0:1:2 ...` acima de cada linha. Dentro da VM: `lsscsi` e `lsblk -o NAME,SERIAL,LABEL,MOUNTPOINT`.
+- **Teste de falha de disco — qual disco tirar:** `./10-mapa-discos.sh` mostra, por volume server (porta 8080–8087), o `/dev/sdX` na VM, o label, o disco alvo/serial/qcow2 no KVM e confere os dois lados. `./10-mapa-discos.sh 192.168.100.51:8083` detalha um só e imprime os `virsh detach-disk`/`attach-device` (só leitura; não remove nada sozinho).
 
 ## Requisitos
 
@@ -94,7 +96,7 @@ Por que essa topologia (e não a mínima):
 | RAM | ~18,5 GB | masters 3×1536 + s3front 1024 + pgsql 1536 + nodes 7×1536 + router 1024 (MB) |
 | vCPU | 13 | 1 por VM (aceita overcommit do KVM) |
 | Disco (SO) | ~146 GB | masters 3×12 + s3front 10 + pgsql 20 + nodes 7×10 + router 10 (GB) |
-| Disco (dados) | ~504 GB | só os 7 volume nodes, 8 discos independentes de 9 GB cada (72 GB/node) — 504 GB brutos, ~360 GB úteis com EC 5+2 (eficiência 5/7) |
+| Disco (dados) | ~672 GB | só os 7 volume nodes, 8 discos independentes de 12 GB cada (96 GB/node) — 672 GB brutos, ~480 GB úteis com EC 5+2 (eficiência 5/7); 12 GB para caber 1 volume `.dat` de 10 GB por disco |
 | Virtualização | `/dev/kvm` presente | confirme com `kvm-ok` (pacote `cpu-checker`) ou `ls /dev/kvm` |
 
 Os discos são thin-provisioned (qcow2 com backing file) — o espaço acima é o
@@ -132,15 +134,15 @@ colateral disso no SSH de algumas VMs.
   *quem qualifica*, não *quando* o scan roda; e o `scan_interval_seconds`
   não tem efeito nenhum (achado confirmado, ver `HISTORICO.md`).
 - **Replicação** — código de 3 dígitos **datacenter-rack-node** por volume
-  (`-replication`, ex. `010` = 1 cópia extra em outro rack). Padrão deste
+  (`-replication`, ex. `001` = 1 cópia extra em outro servidor do mesmo rack; `010` não funciona com rack único, por isso o lab fica fixo em `000`). Padrão deste
   cluster é `000` (nenhuma cópia extra, `MASTER_DEFAULT_REPLICATION` em
   `00-config.env`) — de propósito, para isolar o teste de erasure coding.
 - **Erasure Coding (EC)** — mecanismo de redundância alternativo à
   replicação: quebra um volume em *shards* de dados + paridade. Este
   cluster usa **5+2** (`EC_DATA_SHARDS`/`EC_PARITY_SHARDS` em
   `00-config.env`, aplicado via `ec.config -set` automaticamente no fim do
-  `deploy-lab.sh`) — 5 shards de dado + 2 de paridade = 7, 1 por rack,
-  tolerando a perda de até 2 racks/nodes. **Cuidado**: nem todo caminho de
+  `deploy-lab.sh`) — 5 shards de dado + 2 de paridade = 7, 1 por node,
+  tolerando a perda de até 2 nodes. **Cuidado**: nem todo caminho de
   EC deste build respeita esse ratio configurado — ver `HISTORICO.md` para
   os achados detalhados (`ec.encode` manual sempre usa 10+4; o automático
   planeja 5+2 corretamente mas trava antes de executar).
