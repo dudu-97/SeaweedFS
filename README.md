@@ -77,7 +77,7 @@ cluster inteiro responder. Confira com `./06-status.sh` — espera-se
 | swfs-master3 | `weed master` (raft) + `weed filer` | 192.168.100.13 | 1536 MB | 1 | 12 GB |
 | swfs-s3front1 | `weed s3` standalone (gateway S3 puro, aponta pros 3 filers) | 192.168.100.31 | 1024 MB | 1 | 10 GB |
 | swfs-pgsql01 | PostgreSQL — metadata store dos 3 filers (troca o LevelDB embutido) | 192.168.100.41 | 1536 MB | 1 | 20 GB |
-| swfs-node01..07 | `weed volume` — 1 processo **por disco** (8 por node, portas 8080–8087) = 56 volume servers, todos no mesmo rack (`DefaultRack`) | 192.168.100.51-.57 | 1536 MB cada | 1 cada | 10 GB SO + 8× 12 GB dados (discos separados) cada |
+| swfs-node01..07 | `weed volume` — 1 processo **por disco** (8 por node, portas 8080–8087) = 56 volume servers, todos no mesmo rack (`DefaultRack`) | 192.168.100.51-.57 | 1536 MB cada | 1 cada | 10 GB SO + 8× 40 GB dados (discos separados, thin) cada |
 
 Por que essa topologia (e não a mínima):
 - **3 masters** — Raft precisa de quorum ímpar ≥3 para eleição/failover ter algo a demonstrar.
@@ -96,7 +96,7 @@ Por que essa topologia (e não a mínima):
 | RAM | ~18,5 GB | masters 3×1536 + s3front 1024 + pgsql 1536 + nodes 7×1536 + router 1024 (MB) |
 | vCPU | 13 | 1 por VM (aceita overcommit do KVM) |
 | Disco (SO) | ~146 GB | masters 3×12 + s3front 10 + pgsql 20 + nodes 7×10 + router 10 (GB) |
-| Disco (dados) | ~672 GB | só os 7 volume nodes, 8 discos independentes de 12 GB cada (96 GB/node) — 672 GB brutos, ~480 GB úteis com EC 5+2 (eficiência 5/7); 12 GB para caber 1 volume `.dat` de 10 GB por disco |
+| Disco (dados) | 2,2 TB virtuais (thin) | só os 7 volume nodes, 8 discos independentes de 40 GB cada (320 GB/node) — só ocupam o que for escrito; 40 GB porque o `ec.encode` gera os shards no mesmo disco do volume (`.dat` de 10 GB + ~14 GB de shards por volume codificado) |
 | Virtualização | `/dev/kvm` presente | confirme com `kvm-ok` (pacote `cpu-checker`) ou `ls /dev/kvm` |
 
 Os discos são thin-provisioned (qcow2 com backing file) — o espaço acima é o

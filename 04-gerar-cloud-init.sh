@@ -857,15 +857,23 @@ EC_ROTINA_SH=$(cat <<'ENDECROTINA'
 MASTER="${SEAWEED_MASTER:-localhost:9333}"
 FULL="${EC_FULL_PERCENT:-95}"
 QUIET="${EC_QUIET_FOR:-1h}"
+BATCH="${EC_BATCH_SIZE:-10}"
+PAR="${EC_MAX_PARALLEL:-10}"
 
-echo "=== $(date '+%F %T') rotina de EC (fullPercent=$FULL quietFor=$QUIET) ==="
-weed shell -master="$MASTER" <<CMDS 2>&1
+echo "=== $(date '+%F %T') rotina de EC (fullPercent=$FULL quietFor=$QUIET batchSize=$BATCH maxParallelization=$PAR) ==="
+TMP=$(mktemp)
+weed shell -master="$MASTER" <<CMDS 2>&1 | tee "$TMP"
 lock
-ec.encode -collection=*,_default -fullPercent=$FULL -quietFor=$QUIET -verbose
-ec.balance -apply
+ec.encode -collection=*,_default -fullPercent=$FULL -quietFor=$QUIET -batchSize=$BATCH -maxParallelization=$PAR -verbose
+ec.balance -apply -maxParallelization=$PAR
 unlock
 CMDS
-echo "=== $(date '+%F %T') fim (weed shell exit $?) ==="
+RC=${PIPESTATUS[0]}
+# o weed shell sai com 0 mesmo quando um comando falha; detecta o "error:" no texto
+if grep -q '^error:' "$TMP"; then RC=1; fi
+rm -f "$TMP"
+echo "=== $(date '+%F %T') fim (weed shell exit $RC) ==="
+exit $RC
 ENDECROTINA
 )
 
@@ -2301,6 +2309,8 @@ ${EC_ROTINA_SH_INDENTED}
       # Rotina de Erasure Coding (ec.encode + ec.balance). Log: /var/log/swfs-ec-rotina.log
       EC_FULL_PERCENT=${EC_CRON_FULL_PERCENT}
       EC_QUIET_FOR=${EC_CRON_QUIET_FOR}
+      EC_BATCH_SIZE=${EC_CRON_BATCH_SIZE}
+      EC_MAX_PARALLEL=${EC_CRON_MAX_PARALLEL}
       ${EC_CRON_SCHEDULE} ${VM_USER} /usr/bin/flock -n /tmp/swfs-ec.lock /usr/local/bin/swfs-ec-rotina.sh >> /var/log/swfs-ec-rotina.log 2>&1
 
   - path: /etc/logrotate.d/swfs-ec
