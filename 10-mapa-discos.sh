@@ -93,6 +93,11 @@ for disk in ET.parse(xml_path).getroot().findall("./devices/disk"):
     clean = ET.fromstring(ET.tostring(disk))
     for a in clean.findall("alias"):
         clean.remove(a)
+    # campos so de leitura do dumpxml: atrapalham o attach de um disco NOVO no mesmo endereco
+    for b in clean.findall("backingStore"):
+        clean.remove(b)
+    for sc in clean.findall("source"):
+        sc.attrib.pop("index", None)
     kvm[int(addr.get("target"))] = dict(
         dev=tgt.get("dev"),
         serial=disk.findtext("serial") or "",
